@@ -1,0 +1,6 @@
+nfelib
+erpbrasil.assinatura
+erpbrasil.transmissao
+brazilfiscalreport
+fpdf2
+qrcode

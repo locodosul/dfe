@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SCFacil - DF-e</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --ink: #1f2937;
+      --muted: #667085;
+      --line: #d8dee8;
+      --primary: #1769aa;
+      --primary-soft: #e8f2fb;
+      --ok: #12805c;
+      --bad: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: var(--ink); background: var(--bg); }
+    header { background: var(--panel); border-bottom: 1px solid var(--line); padding: 18px 24px; }
+    h1 { margin: 0; font-size: 22px; }
+    header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+    main { max-width: 1180px; margin: 0 auto; padding: 22px; }
+    .status { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .card, .step { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+    .card { padding: 14px; }
+    .card strong { display: block; font-size: 13px; color: var(--muted); }
+    .card span { display: block; margin-top: 6px; font-size: 16px; font-weight: 700; }
+    .layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; align-items: start; }
+    .steps { display: grid; gap: 12px; }
+    .step { display: grid; grid-template-columns: 42px 1fr auto; gap: 12px; align-items: center; padding: 14px; }
+    .badge { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); font-weight: 700; }
+    .step h2 { margin: 0; font-size: 16px; }
+    .step p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    button { min-height: 36px; border: 1px solid var(--primary); border-radius: 6px; background: var(--primary); color: #fff; font-weight: 700; padding: 8px 12px; cursor: pointer; white-space: nowrap; }
+    button.secondary { background: #fff; color: var(--primary); }
+    button:disabled { opacity: .6; cursor: wait; }
+    label { display: block; color: var(--muted); font-size: 12px; font-weight: 700; margin-top: 12px; }
+    input, select { width: 100%; min-height: 36px; margin-top: 5px; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 14px; background: #fff; color: var(--ink); }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e5e7eb; border: 0; padding: 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; min-height: 220px; }
+    .links a { display: inline-block; margin: 6px 8px 0 0; color: var(--primary); font-weight: 700; }
+    .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    ul { margin: 8px 0 0; padding-left: 18px; }
+    li { margin: 4px 0; }
+    @media (max-width: 860px) {
+      .status, .layout { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 36px 1fr; }
+      .step button { grid-column: 1 / -1; width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SCFacil DF-e</h1>
+    <p>Menu local para gerar XML, assinar, validar, transmitir, salvar PDF/XML autorizado e enviar por e-mail em homologacao.</p>
+  </header>
+
+  <main>
+    <section class="status">
+      <div class="card"><strong>Ambiente</strong><span>Homologacao</span></div>
+      <div class="card"><strong>Serie</strong><span>1</span></div>
+      <div class="card"><strong>Ultimo numero</strong><span id="ultimoNumero">...</span></div>
+      <div class="card"><strong>Documento</strong><span id="documentoAtual">NFC-e</span></div>
+    </section>
+
+    <section class="layout">
+      <div class="steps">
+        <article class="step">
+          <div class="badge">1</div>
+          <div><h2>Gerar XML base</h2><p>Monta NF-e, NFC-e, MDF-e ou CT-e em homologacao sem assinatura.</p></div>
+          <button class="secondary" data-acao="gerar">Executar</button>
+        </article>
+        <article class="step">
+          <div class="badge">2</div>
+          <div><h2>Assinar e validar</h2><p>Assina com certificado e valida o schema, sem gerar PDF antes da autorizacao.</p></div>
+          <button class="secondary" data-acao="assinar_validar">Executar</button>
+        </article>
+        <article class="step">
+          <div class="badge">3</div>
+          <div><h2>Transmitir e Imprimir</h2><p>Envia para SEFAZ/RS, salva chave.xml/chave.pdf autorizado e abre a impressao.</p></div>
+          <button data-acao="transmitir">Executar</button>
+        </article>
+        <article class="step">
+          <div class="badge">4</div>
+          <div><h2>Transmitir e enviar por e-mail</h2><p>Autoriza o documento e envia XML/PDF para os destinatarios configurados.</p></div>
+          <button data-acao="email">Executar</button>
+        </article>
+      </div>
+
+      <aside class="card">
+        <h2>Executor</h2>
+        <p class="note">Esta tela executa o Python local via servidor em <strong>http://127.0.0.1:8765</strong>.</p>
+        <label for="tipoDocumento">Documento fiscal</label>
+        <select id="tipoDocumento">
+          <option value="nfce">NFC-e modelo 65</option>
+          <option value="nfe">NF-e modelo 55</option>
+          <option value="mdfe">MDF-e modelo 58</option>
+          <option value="cte">CT-e modelo 57</option>
+        </select>
+        <label for="emitente">Emitente</label>
+        <select id="emitente"></select>
+        <label for="numero">Numero manual opcional</label>
+        <input id="numero" type="number" min="1" placeholder="Ex.: 10">
+        <label>Resultado</label>
+        <pre id="log">Aguardando acao.</pre>
+        <div class="links" id="links"></div>
+        <h3>Ultimos arquivos</h3>
+        <ul id="arquivos"></ul>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const log = document.querySelector("#log");
+    const links = document.querySelector("#links");
+    const arquivos = document.querySelector("#arquivos");
+    const ultimoNumero = document.querySelector("#ultimoNumero");
+    const documentoAtual = document.querySelector("#documentoAtual");
+    const numero = document.querySelector("#numero");
+    const tipoDocumento = document.querySelector("#tipoDocumento");
+    const emitente = document.querySelector("#emitente");
+
+    async function carregarStatus() {
+      const resposta = await fetch("/api/status");
+      const dados = await resposta.json();
+      ultimoNumero.textContent = dados.ultimo_numero;
+      if (!emitente.options.length) {
+        dados.emitentes.forEach((item) => {
+          const option = document.createElement("option");
+          option.value = item.id;
+          option.textContent = item.nome;
+          emitente.appendChild(option);
+        });
+        if (dados.emitente_padrao) {
+          emitente.value = dados.emitente_padrao;
+        }
+      }
+      arquivos.innerHTML = "";
+      dados.arquivos.forEach((arquivo) => {
+        const li = document.createElement("li");
+        li.innerHTML = `<a href="${arquivo.url}" target="_blank">${arquivo.nome}</a>`;
+        arquivos.appendChild(li);
+      });
+    }
+
+    async function executar(acao, botao) {
+      botao.disabled = true;
+      links.innerHTML = "";
+      log.textContent = "Executando...";
+      let janelaImpressao = null;
+      if (acao === "transmitir") {
+        janelaImpressao = window.open("about:blank", "_blank");
+        if (janelaImpressao) {
+          janelaImpressao.document.write("<p style='font: 16px Arial; padding: 24px'>Aguardando autorizacao do documento...</p>");
+        }
+      }
+      try {
+        const resposta = await fetch("/api/executar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            acao,
+            numero: numero.value.trim(),
+            tipo: tipoDocumento.value,
+            emitente: emitente.value
+          })
+        });
+        const dados = await resposta.json();
+        const partes = [
+          `Comando: ${dados.comando || ""}`,
+          "",
+          dados.saida || "",
+          dados.erro ? `ERRO:\n${dados.erro}` : ""
+        ];
+        log.textContent = partes.join("\n").trim();
+        if (dados.links) {
+          for (const [nome, url] of Object.entries(dados.links)) {
+            const a = document.createElement("a");
+            a.href = url;
+            a.target = "_blank";
+            a.textContent = nome.toUpperCase();
+            links.appendChild(a);
+          }
+          if (acao === "transmitir" && dados.links.pdf) {
+            const arquivo = dados.links.pdf.split("/").pop();
+            const urlImpressao = `/imprimir?arquivo=${encodeURIComponent(arquivo)}`;
+            if (janelaImpressao) {
+              janelaImpressao.location.href = urlImpressao;
+            } else {
+              window.open(urlImpressao, "_blank");
+            }
+          } else if (janelaImpressao) {
+            janelaImpressao.close();
+          }
+        }
+        await carregarStatus();
+      } catch (erro) {
+        if (janelaImpressao) {
+          janelaImpressao.close();
+        }
+        log.textContent = `Falha ao executar: ${erro}`;
+      } finally {
+        botao.disabled = false;
+      }
+    }
+
+    document.querySelectorAll("button[data-acao]").forEach((botao) => {
+      botao.addEventListener("click", () => executar(botao.dataset.acao, botao));
+    });
+
+    tipoDocumento.addEventListener("change", () => {
+      documentoAtual.textContent = {
+        nfce: "NFC-e",
+        nfe: "NF-e",
+        mdfe: "MDF-e",
+        cte: "CT-e"
+      }[tipoDocumento.value];
+      if (tipoDocumento.value === "cte") {
+        const btx = Array.from(emitente.options).find((option) => option.value === "btx");
+        if (btx) {
+          emitente.value = "btx";
+        }
+      }
+    });
+
+    carregarStatus();
+  </script>
+</body>
+</html>

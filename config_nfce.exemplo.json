@@ -1,0 +1,89 @@
+{
+  "ambiente": "homologacao",
+  "emitente_padrao": "rambo",
+  "emitentes": [
+    {
+      "id": "rambo",
+      "nome_exibicao": "RAMBO NUTRIFIT",
+      "certificado": {
+        "caminho": "C:\\Sistema\\codexNfe\\certificado.pfx",
+        "nome": "RAMBO NUTRIFIT DISTRIBUIDORA LTDA",
+        "senha": "INFORME_A_SENHA"
+      },
+      "dados": {
+        "cnpj": "27123482000123",
+        "nome": "RAMBO NUTRIFIT DISTRIBUIDORA LTDA",
+        "fantasia": "DISTRIBUIDORA RAMBO NUTRIFIT",
+        "inscricao_estadual": "0240527534",
+        "crt": "1",
+        "uf_codigo": "43",
+        "uf_sigla": "RS",
+        "municipio_codigo": "4304606",
+        "municipio_nome": "Canoas",
+        "logradouro": "R SANTA CRUZ",
+        "numero": "500",
+        "bairro": "NITEROI",
+        "cep": "92120100"
+      },
+      "tributacao": {
+        "regime_tributario": "simples_nacional",
+        "icms": {
+          "cst": "00",
+          "modalidade_base_calculo": "3",
+          "aliquota": "18.00"
+        }
+      }
+    },
+    {
+      "id": "btx",
+      "nome_exibicao": "BTX TRANSPORTES",
+      "certificado": {
+        "caminho": "C:\\Sistema\\codexNfe\\btx.pfx",
+        "nome": "RAFAEL DE OLIVEIRA BOARETTO TRANSPORTADORA",
+        "senha": "INFORME_A_SENHA"
+      },
+      "dados": {
+        "cnpj": "24524375000119",
+        "nome": "RAFAEL DE OLIVEIRA BOARETTO TRANSPORTADORA",
+        "fantasia": "BTX TRANSPORTES",
+        "inscricao_estadual": "188188359114",
+        "crt": "1",
+        "uf_codigo": "35",
+        "uf_sigla": "SP",
+        "municipio_codigo": "3503901",
+        "municipio_nome": "Aruja",
+        "logradouro": "AVEN GOVERNADOR MARIO COVAS JUNIOR",
+        "numero": "2222",
+        "bairro": "PORTAO",
+        "cep": "07412000"
+      },
+      "tributacao": {
+        "regime_tributario": "simples_nacional",
+        "icms": {
+          "cst": "00",
+          "modalidade_base_calculo": "3",
+          "aliquota": "18.00"
+        }
+      }
+    }
+  ],
+  "csc": {
+    "id": "1",
+    "token": "INFORME_O_TOKEN_CSC"
+  },
+  "email": {
+    "destinatarios": [
+      "destinatario1@exemplo.com",
+      "destinatario2@exemplo.com",
+      "destinatario3@exemplo.com"
+    ],
+    "smtp": {
+      "host": "smtp.exemplo.com",
+      "porta": 587,
+      "usuario": "usuario@exemplo.com",
+      "senha": "INFORME_A_SENHA_SMTP",
+      "usar_tls": true,
+      "remetente": "usuario@exemplo.com"
+    }
+  }
+}

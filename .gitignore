@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.rar
+
+# Arquivos sensiveis
+*.pfx
+*.p12
+.env
+config_nfce.json
+
+# Saidas geradas pelo exemplo
+saida/
+
+# Controle local temporario de numeracao
+ultimo_numero_nfce.txt
+menu_porta_atual.txt
