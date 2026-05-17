@@ -44,6 +44,21 @@
     .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
     .ok { color: var(--ok); }
     .bad { color: var(--bad); }
+    .grid-card { margin-top: 12px; overflow: hidden; }
+    .grid-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .grid-head h2 { margin: 0; font-size: 16px; }
+    .grid-wrap { overflow: auto; max-height: 360px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 980px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 7px 8px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); background: #f8fafc; font-size: 11px; text-transform: uppercase; }
+    tr { cursor: default; }
+    tr[data-pdf] { cursor: pointer; }
+    tr.status-autorizado td:first-child { border-left: 4px solid var(--ok); }
+    tr.status-erro td:first-child { border-left: 4px solid var(--bad); }
+    .erro { color: var(--bad); max-width: 280px; }
+    .status-pill { display: inline-block; border-radius: 999px; padding: 2px 7px; font-weight: 700; font-size: 11px; background: #eef2f7; }
+    .status-pill.autorizado { color: var(--ok); background: #e9f7f1; }
+    .status-pill.erro { color: var(--bad); background: #fff0ee; }
     ul { margin: 8px 0 0; padding-left: 18px; }
     li { margin: 4px 0; }
     @media (max-width: 860px) {
@@ -89,6 +104,32 @@
           <div><h2>Transmitir e enviar por e-mail</h2><p>Autoriza o documento e envia XML/PDF para os destinatarios configurados.</p></div>
           <button data-acao="email">Executar</button>
         </article>
+        <section class="card grid-card">
+          <div class="grid-head">
+            <h2>DF-e emitidos e transmitidos</h2>
+            <button class="secondary" type="button" id="atualizarGrid">Atualizar</button>
+          </div>
+          <div class="grid-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Tipo</th>
+                  <th>Numero</th>
+                  <th>Serie</th>
+                  <th>Emissao</th>
+                  <th>Valor</th>
+                  <th>Chave</th>
+                  <th>Protocolo</th>
+                  <th>Erro</th>
+                </tr>
+              </thead>
+              <tbody id="gridDocumentos">
+                <tr><td colspan="9">Carregando...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
 
       <aside class="card">
@@ -123,6 +164,8 @@
     const numero = document.querySelector("#numero");
     const tipoDocumento = document.querySelector("#tipoDocumento");
     const emitente = document.querySelector("#emitente");
+    const gridDocumentos = document.querySelector("#gridDocumentos");
+    const atualizarGrid = document.querySelector("#atualizarGrid");
 
     async function carregarStatus() {
       const resposta = await fetch("/api/status");
@@ -145,6 +188,57 @@
         li.innerHTML = `<a href="${arquivo.url}" target="_blank">${arquivo.nome}</a>`;
         arquivos.appendChild(li);
       });
+      renderizarGrid(dados.documentos || []);
+    }
+
+    function dataCurta(valor) {
+      return valor ? valor.substring(0, 19).replace("T", " ") : "";
+    }
+
+    function dinheiro(valor) {
+      const numero = Number(valor);
+      if (!Number.isFinite(numero)) return valor || "";
+      return numero.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function renderizarGrid(documentos) {
+      gridDocumentos.innerHTML = "";
+      if (!documentos.length) {
+        gridDocumentos.innerHTML = '<tr><td colspan="9">Nenhum DF-e registrado ainda.</td></tr>';
+        return;
+      }
+      documentos.forEach((doc) => {
+        const tr = document.createElement("tr");
+        const status = (doc.status || "").toLowerCase();
+        tr.className = `status-${status}`;
+        if (doc.pdf_url) {
+          tr.dataset.pdf = doc.pdf_url;
+          tr.title = "Duplo clique para abrir o PDF";
+        }
+        tr.innerHTML = `
+          <td><span class="status-pill ${status}">${doc.status || ""}</span></td>
+          <td>${doc.tipo || ""}</td>
+          <td>${doc.numero || ""}</td>
+          <td>${doc.serie || ""}</td>
+          <td>${dataCurta(doc.data_emissao)}</td>
+          <td>${dinheiro(doc.valor)}</td>
+          <td>${doc.chave || ""}</td>
+          <td>${doc.protocolo || ""}</td>
+          <td class="erro">${doc.erro || ""}</td>
+        `;
+        tr.addEventListener("dblclick", () => {
+          if (doc.pdf_url) {
+            window.open(doc.pdf_url, "_blank");
+          }
+        });
+        gridDocumentos.appendChild(tr);
+      });
+    }
+
+    async function carregarDocumentos() {
+      const resposta = await fetch("/api/documentos");
+      const dados = await resposta.json();
+      renderizarGrid(dados.documentos || []);
     }
 
     async function executar(acao, botao) {
@@ -186,7 +280,7 @@
             links.appendChild(a);
           }
           if (acao === "transmitir" && dados.links.pdf) {
-            const arquivo = dados.links.pdf.split("/").pop();
+            const arquivo = dados.links.pdf.replace(/^\/saida\//, "");
             const urlImpressao = `/imprimir?arquivo=${encodeURIComponent(arquivo)}`;
             if (janelaImpressao) {
               janelaImpressao.location.href = urlImpressao;
@@ -211,6 +305,8 @@
     document.querySelectorAll("button[data-acao]").forEach((botao) => {
       botao.addEventListener("click", () => executar(botao.dataset.acao, botao));
     });
+
+    atualizarGrid.addEventListener("click", carregarDocumentos);
 
     tipoDocumento.addEventListener("change", () => {
       documentoAtual.textContent = {

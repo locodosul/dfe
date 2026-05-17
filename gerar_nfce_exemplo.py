@@ -20,6 +20,7 @@ import json
 import getpass
 import hashlib
 import os
+import shutil
 import smtplib
 from email.message import EmailMessage
 from dataclasses import dataclass, replace
@@ -82,6 +83,7 @@ FUSO_BRASIL = timezone(timedelta(hours=-3))
 CERTIFICADO_PADRAO = Path(__file__).parent / "certificado.pfx"
 CONFIG_PADRAO = Path(__file__).parent / "config_nfce.json"
 ULTIMO_NUMERO_PADRAO = Path(__file__).parent / "ultimo_numero_nfce.txt"
+REGISTRO_DFE_PADRAO = Path(__file__).parent / "dfe_emitidos.json"
 URL_CONSULTA_NFCE_RS = "https://www.sefaz.rs.gov.br/NFCE/NFCE-COM.aspx"
 URL_AUTORIZACAO_NFCE_HOMOLOGACAO_SVRS = (
     "https://nfce-homologacao.sefazrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx"
@@ -919,6 +921,32 @@ def obter_chave_xml(xml: str, prefixo: str) -> str:
     return valor.removeprefix(prefixo)
 
 
+def pasta_ano_mes_chave(chave: str) -> str:
+    """Retorna aaaamm a partir da chave de acesso."""
+    ano_mes = chave[2:6] if len(chave) >= 6 else datetime.now(FUSO_BRASIL).strftime("%y%m")
+    return f"20{ano_mes}"
+
+
+def caminho_saida_documento(pasta_saida: Path, chave: str) -> Path:
+    """Pasta mensal onde os arquivos finais do documento ficam guardados."""
+    pasta = pasta_saida / pasta_ano_mes_chave(chave)
+    pasta.mkdir(parents=True, exist_ok=True)
+    return pasta
+
+
+def mover_para_pasta_mensal(caminho: Path, chave: str, pasta_saida: Path) -> Path:
+    """Move arquivo do documento para a pasta aaaamm, se necessario."""
+    if not caminho.exists():
+        return caminho
+    destino = caminho_saida_documento(pasta_saida, chave) / caminho.name
+    if caminho.resolve() == destino.resolve():
+        return caminho
+    if destino.exists():
+        destino.unlink()
+    shutil.move(str(caminho), str(destino))
+    return destino
+
+
 def montar_lote_envio(xml_assinado: str, id_lote: str) -> str:
     """Monta o enviNFe síncrono para autorizacao da NFC-e."""
     nfe_assinada = etree.fromstring(xml_assinado.encode("utf-8"))
@@ -964,7 +992,8 @@ def transmitir_documento_homologacao(
         if tipo_documento in {"mdfe", "cte"}
         else montar_lote_envio(xml_assinado, id_lote)
     )
-    caminho_lote = pasta_saida / f"{chave}-lote.xml"
+    pasta_documento = caminho_saida_documento(pasta_saida, chave)
+    caminho_lote = pasta_documento / f"{chave}-lote.xml"
     caminho_lote.write_text(xml_lote, encoding="utf-8")
     url_autorizacao = {
         "nfce": URL_AUTORIZACAO_NFCE_HOMOLOGACAO_SVRS,
@@ -1023,7 +1052,7 @@ def transmitir_documento_homologacao(
                 )
 
     retorno = resposta.text
-    caminho_retorno = pasta_saida / f"{chave}-retorno.xml"
+    caminho_retorno = pasta_documento / f"{chave}-retorno.xml"
     caminho_retorno.write_text(retorno, encoding="utf-8")
     return retorno
 
@@ -1054,6 +1083,32 @@ def extrair_protocolo_autorizado(xml_retorno: str, tipo_documento: str = "nfce")
             return protocolo
 
     return None
+
+
+def extrair_status_retorno(xml_retorno: str | None, tipo_documento: str = "nfce") -> dict:
+    """Extrai cStat/xMotivo/protocolo de qualquer retorno de autorizacao."""
+    if not xml_retorno:
+        return {"cstat": "", "motivo": "", "protocolo": "", "data_recebimento": ""}
+
+    raiz = etree.fromstring(xml_retorno.encode("utf-8"))
+    if tipo_documento == "mdfe":
+        ns = {"dfe": NAMESPACE_MDFE}
+        prot_xpath = ".//dfe:protMDFe/dfe:infProt"
+    elif tipo_documento == "cte":
+        ns = {"dfe": NAMESPACE_CTE}
+        prot_xpath = ".//dfe:protCTe/dfe:infProt"
+    else:
+        ns = {"dfe": NAMESPACE_NFE}
+        prot_xpath = ".//dfe:protNFe/dfe:infProt"
+
+    protocolo = raiz.find(prot_xpath, namespaces=ns)
+    alvo = protocolo if protocolo is not None else raiz
+    return {
+        "cstat": alvo.findtext(".//dfe:cStat", namespaces=ns) or "",
+        "motivo": alvo.findtext(".//dfe:xMotivo", namespaces=ns) or "",
+        "protocolo": alvo.findtext(".//dfe:nProt", namespaces=ns) or "",
+        "data_recebimento": alvo.findtext(".//dfe:dhRecbto", namespaces=ns) or "",
+    }
 
 
 def retorno_tem_autorizacao(xml_retorno: str | None, tipo_documento: str = "nfce") -> bool:
@@ -1097,6 +1152,58 @@ def montar_xml_processado(
         xml_declaration=True,
         pretty_print=True,
     ).decode("utf-8")
+
+
+def dados_documento_xml(xml: str, tipo_documento: str) -> dict:
+    """Extrai numero, serie, emissao e valor do XML do documento."""
+    raiz = etree.fromstring(xml.encode("utf-8"))
+    if tipo_documento == "mdfe":
+        ns = {"dfe": NAMESPACE_MDFE}
+        return {
+            "numero": raiz.findtext(".//dfe:ide/dfe:nMDF", namespaces=ns) or "",
+            "serie": raiz.findtext(".//dfe:ide/dfe:serie", namespaces=ns) or "",
+            "data_emissao": raiz.findtext(".//dfe:ide/dfe:dhEmi", namespaces=ns) or "",
+            "valor": raiz.findtext(".//dfe:tot/dfe:vCarga", namespaces=ns) or "",
+        }
+    if tipo_documento == "cte":
+        ns = {"dfe": NAMESPACE_CTE}
+        return {
+            "numero": raiz.findtext(".//dfe:ide/dfe:nCT", namespaces=ns) or "",
+            "serie": raiz.findtext(".//dfe:ide/dfe:serie", namespaces=ns) or "",
+            "data_emissao": raiz.findtext(".//dfe:ide/dfe:dhEmi", namespaces=ns) or "",
+            "valor": raiz.findtext(".//dfe:vPrest/dfe:vTPrest", namespaces=ns) or "",
+        }
+
+    ns = {"dfe": NAMESPACE_NFE}
+    return {
+        "numero": raiz.findtext(".//dfe:ide/dfe:nNF", namespaces=ns) or "",
+        "serie": raiz.findtext(".//dfe:ide/dfe:serie", namespaces=ns) or "",
+        "data_emissao": raiz.findtext(".//dfe:ide/dfe:dhEmi", namespaces=ns) or "",
+        "valor": raiz.findtext(".//dfe:total/dfe:ICMSTot/dfe:vNF", namespaces=ns) or "",
+    }
+
+
+def carregar_registro_dfe(caminho: Path = REGISTRO_DFE_PADRAO) -> list[dict]:
+    if not caminho.exists():
+        return []
+    return json.loads(caminho.read_text(encoding="utf-8-sig") or "[]")
+
+
+def salvar_registro_dfe(registros: list[dict], caminho: Path = REGISTRO_DFE_PADRAO) -> None:
+    caminho.write_text(
+        json.dumps(registros, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def registrar_dfe(registro: dict, caminho: Path = REGISTRO_DFE_PADRAO) -> None:
+    """Insere ou atualiza um documento emitido/transmitido no registro local."""
+    registros = carregar_registro_dfe(caminho)
+    chave = registro.get("chave")
+    registros = [item for item in registros if item.get("chave") != chave]
+    registros.append(registro)
+    registros.sort(key=lambda item: str(item.get("atualizado_em", "")), reverse=True)
+    salvar_registro_dfe(registros, caminho)
 
 
 def gerar_pdf_nfce(xml: str, caminho_pdf: Path) -> None:
@@ -1600,7 +1707,7 @@ def salvar_arquivos_finais(
     xml_retorno: str | None,
     pasta_saida: Path,
     tipo_documento: str = "nfce",
-) -> None:
+) -> dict:
     """Salva chave.xml e chave.pdf somente quando houver autorizacao."""
     protocolo = (
         extrair_protocolo_autorizado(xml_retorno, tipo_documento)
@@ -1610,13 +1717,14 @@ def salvar_arquivos_finais(
 
     if protocolo is None:
         print("Documento nao autorizado: PDF e XML final nao foram gerados sem protocolo.")
-        return
+        return {}
 
     xml_final = montar_xml_processado(xml_assinado, protocolo, tipo_documento)
     print("Documento autorizado: protocolo encontrado no retorno.")
 
-    caminho_xml_final = pasta_saida / f"{chave}.xml"
-    caminho_pdf = pasta_saida / f"{chave}.pdf"
+    pasta_documento = caminho_saida_documento(pasta_saida, chave)
+    caminho_xml_final = pasta_documento / f"{chave}.xml"
+    caminho_pdf = pasta_documento / f"{chave}.pdf"
     caminho_xml_final.write_text(xml_final, encoding="utf-8")
     print(f"XML final salvo em: {caminho_xml_final}")
 
@@ -1625,6 +1733,11 @@ def salvar_arquivos_finais(
         print(f"PDF salvo em: {caminho_pdf}")
     except Exception as erro:
         print(f"Nao foi possivel gerar o PDF agora: {erro}")
+
+    return {
+        "xml": str(caminho_xml_final),
+        "pdf": str(caminho_pdf) if caminho_pdf.exists() else "",
+    }
 
 
 def enviar_documento_por_email(
@@ -1920,22 +2033,80 @@ def main() -> None:
     if args.transmitir:
         certificado = Certificado(str(caminho_certificado), senha_certificado)
         print(f"Transmitindo {nome_documento} para homologacao...")
-        xml_retorno = transmitir_documento_homologacao(
-            xml_assinado=xml_assinado,
-            chave=chave,
-            certificado=certificado,
-            pasta_saida=pasta_saida,
-            tipo_documento=args.tipo,
-            uf_emitente=emitente.uf_sigla,
-        )
-        salvar_arquivos_finais(
+        try:
+            xml_retorno = transmitir_documento_homologacao(
+                xml_assinado=xml_assinado,
+                chave=chave,
+                certificado=certificado,
+                pasta_saida=pasta_saida,
+                tipo_documento=args.tipo,
+                uf_emitente=emitente.uf_sigla,
+            )
+        except Exception as erro:
+            dados_xml = dados_documento_xml(xml_assinado, args.tipo)
+            registrar_dfe(
+                {
+                    "tipo": args.tipo.upper(),
+                    "emitente": config_emitente.get("id"),
+                    "emitente_nome": emitente.nome,
+                    "chave": chave,
+                    "numero": dados_xml.get("numero"),
+                    "serie": dados_xml.get("serie"),
+                    "protocolo": "",
+                    "data_emissao": dados_xml.get("data_emissao"),
+                    "valor": dados_xml.get("valor"),
+                    "status": "erro",
+                    "cstat": "",
+                    "erro": str(erro),
+                    "motivo": str(erro),
+                    "data_recebimento": "",
+                    "xml": "",
+                    "pdf": "",
+                    "retorno": "",
+                    "lote": "",
+                    "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
+                }
+            )
+            print(f"Erro na transmissao registrado: {erro}")
+            raise SystemExit(1) from erro
+
+        caminhos_finais = salvar_arquivos_finais(
             chave=chave,
             xml_assinado=xml_assinado,
             xml_retorno=xml_retorno,
             pasta_saida=pasta_saida,
             tipo_documento=args.tipo,
         )
-        if retorno_tem_autorizacao(xml_retorno, args.tipo):
+        status_retorno = extrair_status_retorno(xml_retorno, args.tipo)
+        autorizado = retorno_tem_autorizacao(xml_retorno, args.tipo)
+        dados_xml = dados_documento_xml(xml_assinado, args.tipo)
+        caminho_retorno = caminho_saida_documento(pasta_saida, chave) / f"{chave}-retorno.xml"
+        caminho_lote = caminho_saida_documento(pasta_saida, chave) / f"{chave}-lote.xml"
+        registrar_dfe(
+            {
+                "tipo": args.tipo.upper(),
+                "emitente": config_emitente.get("id"),
+                "emitente_nome": emitente.nome,
+                "chave": chave,
+                "numero": dados_xml.get("numero"),
+                "serie": dados_xml.get("serie"),
+                "protocolo": status_retorno.get("protocolo"),
+                "data_emissao": dados_xml.get("data_emissao"),
+                "valor": dados_xml.get("valor"),
+                "status": "autorizado" if autorizado else "erro",
+                "cstat": status_retorno.get("cstat"),
+                "erro": "" if autorizado else status_retorno.get("motivo"),
+                "motivo": status_retorno.get("motivo"),
+                "data_recebimento": status_retorno.get("data_recebimento"),
+                "xml": caminhos_finais.get("xml", ""),
+                "pdf": caminhos_finais.get("pdf", ""),
+                "retorno": str(caminho_retorno) if caminho_retorno.exists() else "",
+                "lote": str(caminho_lote) if caminho_lote.exists() else "",
+                "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
+            }
+        )
+
+        if autorizado:
             salvar_ultimo_numero(caminho_ultimo_numero, numeracao.numero)
             print(f"Ultimo numero autorizado salvo em: {caminho_ultimo_numero}")
 
