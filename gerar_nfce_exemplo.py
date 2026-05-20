@@ -1552,24 +1552,30 @@ def gerar_pdf_cte_simples(xml: str, caminho_pdf: Path) -> None:
     pdf.set_xy(margem + 83, y + 6)
     pdf.set_font("Helvetica", "B", 5)
     pdf.cell(80, 3, "Documento Auxiliar do Conhecimento de Transporte Eletronico", align="C")
-    label(margem + 84, y + 12, 12, 9, "Modelo", "57", 8, True, "C")
-    label(margem + 96, y + 12, 12, 9, "Serie", serie, 8, True, "C")
-    label(margem + 108, y + 12, 26, 9, "Numero", f"{int(numero):010d}" if numero.isdigit() else numero, 8, True, "C")
-    label(margem + 134, y + 12, 12, 9, "Folha", "01/01", 8, True, "C")
-    label(margem + 146, y + 12, 17, 9, "Emissao", emissao[:10], 5, False, "C")
+    label(margem + 84, y + 12, 12, 8, "Modelo", "57", 8, True, "C")
+    label(margem + 96, y + 12, 12, 8, "Serie", serie, 8, True, "C")
+    label(margem + 108, y + 12, 26, 8, "Numero", f"{int(numero):010d}" if numero.isdigit() else numero, 8, True, "C")
+    label(margem + 134, y + 12, 12, 8, "Folha", "01/01", 8, True, "C")
+    label(margem + 146, y + 12, 17, 8, "Emissao", emissao[:10], 5, False, "C")
 
     with NamedTemporaryFile(suffix=".png", delete=False) as arquivo_barra:
         caminho_barra = Path(arquivo_barra.name)
     try:
         Code128(chave, writer=ImageWriter()).write(
             caminho_barra.open("wb"),
-            {"module_height": 8, "font_size": 0, "quiet_zone": 1, "write_text": False},
+            {
+                "module_height": 6.5,
+                "module_width": 0.22,
+                "font_size": 0,
+                "quiet_zone": 0.8,
+                "write_text": False,
+            },
         )
-        pdf.image(str(caminho_barra), x=margem + 85, y=y + 22, w=76, h=9)
+        pdf.image(str(caminho_barra), x=margem + 87, y=y + 21.2, w=72, h=7.8)
     finally:
         caminho_barra.unlink(missing_ok=True)
 
-    pdf.set_xy(margem + 84, y + 31)
+    pdf.set_xy(margem + 84, y + 30.2)
     pdf.set_font("Helvetica", "B", 5.5)
     pdf.cell(78, 3, "Chave de acesso", align="C")
 
@@ -1585,7 +1591,7 @@ def gerar_pdf_cte_simples(xml: str, caminho_pdf: Path) -> None:
             caminho_qr = Path(arquivo_qr.name)
             imagem_qr.save(caminho_qr)
         try:
-            pdf.image(str(caminho_qr), x=margem + 168, y=y + 13, w=25)
+            pdf.image(str(caminho_qr), x=margem + 170, y=y + 13, w=21)
         finally:
             caminho_qr.unlink(missing_ok=True)
     y += 35
