@@ -96,7 +96,7 @@ def caminho_numeracao(emitente_id: str | None) -> Path:
 def ler_ultimo_numero(caminho: Path = ULTIMO_NUMERO_NFSE) -> int:
     if not caminho.exists():
         return 0
-    conteudo = caminho.read_text(encoding="utf-8").strip()
+    conteudo = caminho.read_text(encoding="utf-8-sig").strip().lstrip("\ufeff")
     return int(conteudo) if conteudo else 0
 
 
