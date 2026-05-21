@@ -76,6 +76,11 @@ def localizar_emitente(config: dict, emitente_id: str | None) -> dict:
     raise ValueError(f"Emitente nao encontrado no config_nfce.json: {alvo}")
 
 
+def caminho_numeracao(emitente_id: str | None) -> Path:
+    sufixo = "".join(caractere for caractere in str(emitente_id or "padrao") if caractere.isalnum() or caractere in ("-", "_"))
+    return BASE_DIR / f"ultimo_numero_nfse_{sufixo}.txt"
+
+
 def ler_ultimo_numero(caminho: Path = ULTIMO_NUMERO_NFSE) -> int:
     if not caminho.exists():
         return 0
@@ -87,8 +92,8 @@ def salvar_ultimo_numero(numero: int, caminho: Path = ULTIMO_NUMERO_NFSE) -> Non
     caminho.write_text(str(numero), encoding="utf-8")
 
 
-def proximo_numero(numero_manual: int | None) -> int:
-    return numero_manual if numero_manual is not None else ler_ultimo_numero() + 1
+def proximo_numero(numero_manual: int | None, caminho: Path) -> int:
+    return numero_manual if numero_manual is not None else ler_ultimo_numero(caminho) + 1
 
 
 def enum_por_valor(enum_cls, valor: str):
@@ -223,7 +228,9 @@ def gerar_arquivos(
 ) -> ArquivosNfse:
     config = carregar_config()
     emitente_config = localizar_emitente(config, emitente_id)
-    numero = proximo_numero(numero_manual)
+    emitente_codigo = emitente_config.get("id") or emitente_id
+    caminho_ultimo_numero = caminho_numeracao(emitente_codigo)
+    numero = proximo_numero(numero_manual, caminho_ultimo_numero)
     data_emissao = datetime.now(FUSO_BRASIL)
     dps = montar_dps(
         config=config,
@@ -258,8 +265,8 @@ def gerar_arquivos(
         print("DPS validada pela nfelib sem erros de schema.")
 
     if assinar and validar_schema and numero_manual is None:
-        salvar_ultimo_numero(numero)
-        print(f"Ultimo numero NFS-e salvo em: {ULTIMO_NUMERO_NFSE}")
+        salvar_ultimo_numero(numero, caminho_ultimo_numero)
+        print(f"Ultimo numero NFS-e salvo em: {caminho_ultimo_numero}")
 
     return ArquivosNfse(xml_dps=caminho_xml, xml_assinado=caminho_assinado)
 

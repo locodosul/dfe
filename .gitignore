@@ -14,5 +14,6 @@ saida/
 # Controle local temporario de numeracao
 ultimo_numero_nfce.txt
 ultimo_numero_nfse.txt
+ultimo_numero_nfse_*.txt
 menu_porta_atual.txt
 dfe_emitidos.json
