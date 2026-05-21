@@ -9,11 +9,18 @@ o XML base estiver estabilizado.
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+import requests
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.serialization import pkcs12
+from lxml import etree
 from nfelib.nfse.bindings.v1_0.dps_v1_00 import Dps
 from nfelib.nfse.bindings.v1_0.tipos_complexos_v1_00 import (
     Tccserv,
@@ -49,12 +56,17 @@ ULTIMO_NUMERO_NFSE = BASE_DIR / "ultimo_numero_nfse.txt"
 FUSO_BRASIL = timezone(timedelta(hours=-3))
 VERSAO_NFSE = "1.01"
 AMBIENTE_RESTRITO = "2"
+URL_SEFIN_RESTRITA = "https://sefin.producaorestrita.nfse.gov.br/SefinNacional"
+REGISTRO_DFE = BASE_DIR / "dfe_emitidos.json"
+NAMESPACE_NFSE = "http://www.sped.fazenda.gov.br/nfse"
 
 
 @dataclass(frozen=True)
 class ArquivosNfse:
     xml_dps: Path
     xml_assinado: Path | None = None
+    xml_nfse: Path | None = None
+    retorno: Path | None = None
 
 
 def somente_digitos(valor: str | None) -> str:
@@ -101,6 +113,67 @@ def enum_por_valor(enum_cls, valor: str):
         if item.value == str(valor):
             return item
     raise ValueError(f"Valor {valor!r} invalido para {enum_cls.__name__}")
+
+
+def xml_para_bytes_utf8(xml: str) -> bytes:
+    raiz = etree.fromstring(xml.encode("utf-8"))
+    return etree.tostring(
+        raiz,
+        encoding="UTF-8",
+        xml_declaration=True,
+        pretty_print=False,
+    )
+
+
+def compactar_base64(xml: str) -> str:
+    return base64.b64encode(gzip.compress(xml_para_bytes_utf8(xml))).decode("ascii")
+
+
+def descompactar_base64(valor: str) -> str:
+    return gzip.decompress(base64.b64decode(valor)).decode("utf-8")
+
+
+def carregar_registro_dfe() -> list[dict]:
+    if not REGISTRO_DFE.exists():
+        return []
+    return json.loads(REGISTRO_DFE.read_text(encoding="utf-8-sig") or "[]")
+
+
+def salvar_registro_dfe(registros: list[dict]) -> None:
+    REGISTRO_DFE.write_text(json.dumps(registros, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def registrar_dfe(registro: dict) -> None:
+    registros = carregar_registro_dfe()
+    chave = registro.get("chave")
+    id_dps = registro.get("id_dps")
+    registros = [
+        item
+        for item in registros
+        if not ((chave and item.get("chave") == chave) or (id_dps and item.get("id_dps") == id_dps))
+    ]
+    registros.append(registro)
+    registros.sort(key=lambda item: str(item.get("atualizado_em", "")), reverse=True)
+    salvar_registro_dfe(registros)
+
+
+def dados_nfse_xml(xml: str) -> dict:
+    raiz = etree.fromstring(xml.encode("utf-8"))
+    ns = {"nfse": NAMESPACE_NFSE}
+    inf_nfse = raiz.find(".//nfse:infNFSe", namespaces=ns)
+    chave = (inf_nfse.get("Id") if inf_nfse is not None else "").removeprefix("NFS")
+    return {
+        "chave": chave,
+        "numero": raiz.findtext(".//nfse:nNFSe", namespaces=ns) or "",
+        "protocolo": raiz.findtext(".//nfse:nDFSe", namespaces=ns) or "",
+        "data_emissao": raiz.findtext(".//nfse:DPS/nfse:infDPS/nfse:dhEmi", namespaces=ns) or "",
+        "data_recebimento": raiz.findtext(".//nfse:dhProc", namespaces=ns) or "",
+        "valor": raiz.findtext(".//nfse:infNFSe/nfse:valores/nfse:vLiq", namespaces=ns)
+        or raiz.findtext(".//nfse:DPS/nfse:infDPS/nfse:valores/nfse:vServPrest/nfse:vServ", namespaces=ns)
+        or "",
+        "cstat": raiz.findtext(".//nfse:cStat", namespaces=ns) or "",
+        "motivo": raiz.findtext(".//nfse:xMotivo", namespaces=ns) or "",
+    }
 
 
 def montar_id_dps(codigo_municipio: str, documento_prestador: str, serie: str, numero: int) -> str:
@@ -159,8 +232,6 @@ def montar_dps(
             cLocEmi=municipio,
             prest=TcinfoPrestador(
                 CNPJ=somente_digitos(dados_emitente.get("cnpj")),
-                xNome=dados_emitente.get("nome", ""),
-                end=montar_endereco_nacional(dados_emitente),
                 fone=somente_digitos(dados_emitente.get("fone") or nfse_cfg.get("fone")),
                 email=dados_emitente.get("email") or nfse_cfg.get("email"),
                 regTrib=TcregTrib(
@@ -219,12 +290,62 @@ def assinar_dps(xml: str, dps: Dps, caminho_certificado: Path, senha_certificado
     )
 
 
+def preparar_certificado_requests(caminho_certificado: Path, senha_certificado: str, pasta: Path) -> tuple[str, str]:
+    dados_pfx = caminho_certificado.read_bytes()
+    chave, certificado, cadeia = pkcs12.load_key_and_certificates(
+        dados_pfx,
+        senha_certificado.encode("utf-8"),
+    )
+    if chave is None or certificado is None:
+        raise ValueError("Nao foi possivel extrair chave/certificado do PFX.")
+
+    caminho_cert = pasta / "certificado.pem"
+    caminho_key = pasta / "chave.pem"
+    certificados = [certificado, *(cadeia or [])]
+    caminho_cert.write_bytes(
+        b"".join(cert.public_bytes(serialization.Encoding.PEM) for cert in certificados)
+    )
+    caminho_key.write_bytes(
+        chave.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(caminho_cert), str(caminho_key)
+
+
+def transmitir_dps(
+    *,
+    xml_assinado: str,
+    caminho_certificado: Path,
+    senha_certificado: str,
+    timeout: int = 60,
+) -> tuple[int, dict]:
+    payload = {"dpsXmlGZipB64": compactar_base64(xml_assinado)}
+    with TemporaryDirectory() as temp:
+        cert = preparar_certificado_requests(caminho_certificado, senha_certificado, Path(temp))
+        resposta = requests.post(
+            f"{URL_SEFIN_RESTRITA}/nfse",
+            json=payload,
+            cert=cert,
+            timeout=timeout,
+            headers={"Accept": "application/json"},
+        )
+    try:
+        conteudo = resposta.json()
+    except ValueError:
+        conteudo = {"raw": resposta.text}
+    return resposta.status_code, conteudo
+
+
 def gerar_arquivos(
     *,
     emitente_id: str | None,
     numero_manual: int | None,
     assinar: bool,
     validar_schema: bool,
+    transmitir: bool,
 ) -> ArquivosNfse:
     config = carregar_config()
     emitente_config = localizar_emitente(config, emitente_id)
@@ -248,8 +369,8 @@ def gerar_arquivos(
 
     caminho_assinado = None
     xml_validar = xml
+    certificado = emitente_config.get("certificado") or config.get("certificado") or {}
     if assinar:
-        certificado = emitente_config.get("certificado") or config.get("certificado") or {}
         xml_validar = assinar_dps(
             xml=xml,
             dps=dps,
@@ -264,11 +385,94 @@ def gerar_arquivos(
         Dps.schema_validation(xml_validar)
         print("DPS validada pela nfelib sem erros de schema.")
 
-    if assinar and validar_schema and numero_manual is None:
-        salvar_ultimo_numero(numero, caminho_ultimo_numero)
-        print(f"Ultimo numero NFS-e salvo em: {caminho_ultimo_numero}")
+    caminho_nfse = None
+    caminho_retorno = None
+    if transmitir:
+        if not assinar:
+            raise ValueError("Use --assinar junto com --transmitir.")
+        print("Transmitindo DPS para a Sefin Nacional em producao restrita...")
+        status_http, retorno = transmitir_dps(
+            xml_assinado=xml_validar,
+            caminho_certificado=Path(certificado.get("caminho", "")),
+            senha_certificado=str(certificado.get("senha", "")),
+        )
+        caminho_retorno = pasta / f"dps_nfse_{numero:015d}_retorno.json"
+        caminho_retorno.write_text(json.dumps(retorno, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Retorno salvo em: {caminho_retorno}")
 
-    return ArquivosNfse(xml_dps=caminho_xml, xml_assinado=caminho_assinado)
+        nfse_xml_b64 = retorno.get("nfseXmlGZipB64") or retorno.get("NfseXmlGZipB64")
+        chave_acesso = retorno.get("chaveAcesso") or retorno.get("ChaveAcesso") or ""
+        erro = ""
+        if status_http not in {200, 201}:
+            erros = retorno.get("erros") or retorno.get("Erros") or []
+            erro = json.dumps(erros or retorno, ensure_ascii=False)
+            print(f"Transmissao recusada. HTTP {status_http}: {erro}")
+        if nfse_xml_b64:
+            xml_nfse = descompactar_base64(nfse_xml_b64)
+            dados_nfse = dados_nfse_xml(xml_nfse)
+            chave_acesso = chave_acesso or dados_nfse.get("chave", "")
+            nome_nfse = f"{chave_acesso}.xml" if chave_acesso else f"dps_nfse_{numero:015d}_nfse.xml"
+            caminho_nfse = pasta / nome_nfse
+            caminho_nfse.write_text(xml_nfse, encoding="utf-8")
+            print(f"NFS-e autorizada salva em: {caminho_nfse}")
+            registrar_dfe(
+                {
+                    "tipo": "NFSE",
+                    "emitente": emitente_codigo,
+                    "emitente_nome": (emitente_config.get("dados") or {}).get("nome", ""),
+                    "id_dps": dps.infDPS.Id,
+                    "chave": chave_acesso,
+                    "numero": dados_nfse.get("numero") or str(numero),
+                    "serie": str((emitente_config.get("nfse") or {}).get("serie", "1")),
+                    "protocolo": dados_nfse.get("protocolo", ""),
+                    "data_emissao": dados_nfse.get("data_emissao", ""),
+                    "valor": dados_nfse.get("valor", ""),
+                    "status": "autorizado",
+                    "cstat": dados_nfse.get("cstat", "100"),
+                    "erro": "",
+                    "motivo": dados_nfse.get("motivo", ""),
+                    "data_recebimento": dados_nfse.get("data_recebimento", ""),
+                    "xml": str(caminho_nfse),
+                    "pdf": "",
+                    "retorno": str(caminho_retorno),
+                    "lote": str(caminho_assinado or caminho_xml),
+                    "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
+                }
+            )
+        else:
+            registrar_dfe(
+                {
+                    "tipo": "NFSE",
+                    "emitente": emitente_codigo,
+                    "emitente_nome": (emitente_config.get("dados") or {}).get("nome", ""),
+                    "id_dps": dps.infDPS.Id,
+                    "chave": chave_acesso,
+                    "numero": str(numero),
+                    "serie": str((emitente_config.get("nfse") or {}).get("serie", "1")),
+                    "protocolo": "",
+                    "data_emissao": dps.infDPS.dhEmi,
+                    "valor": (dps.infDPS.valores.vServPrest.vServ if dps.infDPS.valores and dps.infDPS.valores.vServPrest else ""),
+                    "status": "erro",
+                    "cstat": str(status_http),
+                    "erro": erro or json.dumps(retorno, ensure_ascii=False),
+                    "motivo": erro or "Retorno sem XML da NFS-e.",
+                    "data_recebimento": "",
+                    "xml": "",
+                    "pdf": "",
+                    "retorno": str(caminho_retorno),
+                    "lote": str(caminho_assinado or caminho_xml),
+                    "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
+                }
+            )
+            raise SystemExit(1)
+
+    if assinar and validar_schema and (not transmitir or caminho_nfse):
+        numero_atual = ler_ultimo_numero(caminho_ultimo_numero)
+        if numero_manual is None or numero > numero_atual:
+            salvar_ultimo_numero(numero, caminho_ultimo_numero)
+            print(f"Ultimo numero NFS-e salvo em: {caminho_ultimo_numero}")
+
+    return ArquivosNfse(xml_dps=caminho_xml, xml_assinado=caminho_assinado, xml_nfse=caminho_nfse, retorno=caminho_retorno)
 
 
 def main() -> None:
@@ -277,13 +481,18 @@ def main() -> None:
     parser.add_argument("--numero", type=int, help="Numero manual da DPS.")
     parser.add_argument("--assinar", action="store_true", help="Assina a DPS com o certificado do emitente.")
     parser.add_argument("--validar-schema", action="store_true", help="Valida a DPS no schema da nfelib.")
+    parser.add_argument("--transmitir", action="store_true", help="Transmite a DPS para a Sefin Nacional em producao restrita.")
     args = parser.parse_args()
+    if args.transmitir:
+        args.assinar = True
+        args.validar_schema = True
 
     gerar_arquivos(
         emitente_id=args.emitente,
         numero_manual=args.numero,
         assinar=args.assinar,
         validar_schema=args.validar_schema,
+        transmitir=args.transmitir,
     )
 
 
