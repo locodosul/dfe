@@ -141,6 +141,7 @@
           <option value="nfe">NF-e modelo 55</option>
           <option value="mdfe">MDF-e modelo 58</option>
           <option value="cte">CT-e modelo 57</option>
+          <option value="nfse">NFS-e Nacional</option>
         </select>
         <label for="emitente">Emitente</label>
         <select id="emitente"></select>
@@ -314,11 +315,17 @@
         nfe: "NF-e",
         mdfe: "MDF-e",
         cte: "CT-e"
+        ,nfse: "NFS-e"
       }[tipoDocumento.value];
       if (tipoDocumento.value === "cte") {
         const btx = Array.from(emitente.options).find((option) => option.value === "btx");
         if (btx) {
           emitente.value = "btx";
+        }
+      } else if (tipoDocumento.value === "nfse") {
+        const sc = Array.from(emitente.options).find((option) => option.value === "sc");
+        if (sc) {
+          emitente.value = "sc";
         }
       }
     });

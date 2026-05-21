@@ -24,6 +24,7 @@ from lxml import etree
 
 BASE_DIR = Path(__file__).parent
 SCRIPT_NFCE = BASE_DIR / "gerar_nfce_exemplo.py"
+SCRIPT_NFSE = BASE_DIR / "nfse_nacional.py"
 SAIDA_DIR = BASE_DIR / "saida"
 PORTA_ATUAL = BASE_DIR / "menu_porta_atual.txt"
 CONFIG_PADRAO = BASE_DIR / "config_nfce.json"
@@ -33,6 +34,7 @@ PORT = int(os.getenv("SCFACIL_MENU_PORT", "8765"))
 NAMESPACE_NFE = "http://www.portalfiscal.inf.br/nfe"
 NAMESPACE_CTE = "http://www.portalfiscal.inf.br/cte"
 NAMESPACE_MDFE = "http://www.portalfiscal.inf.br/mdfe"
+NAMESPACE_NFSE = "http://www.sped.fazenda.gov.br/nfse"
 
 
 def carregar_config() -> dict:
@@ -55,6 +57,9 @@ def salvar_registro_dfe(registros: list[dict]) -> None:
 
 
 def pasta_ano_mes_chave(chave: str) -> str:
+    if len(chave) == 50 and chave.isdigit():
+        ano_mes = chave[36:40]
+        return f"20{ano_mes}" if len(ano_mes) == 4 else "sem_data"
     ano_mes = chave[2:6] if len(chave) >= 6 else ""
     return f"20{ano_mes}" if len(ano_mes) == 4 else "sem_data"
 
@@ -83,7 +88,7 @@ def organizar_saida_existente() -> None:
             continue
         nome = arquivo.name
         chave = nome.split("-", 1)[0].split(".", 1)[0]
-        if len(chave) != 44 or not chave.isdigit():
+        if len(chave) not in {44, 50} or not chave.isdigit():
             continue
         destino_dir = SAIDA_DIR / pasta_ano_mes_chave(chave)
         destino_dir.mkdir(exist_ok=True)
@@ -121,6 +126,23 @@ def extrair_dados_xml_emitido(xml: str, tipo: str) -> dict:
             "data_recebimento": raiz.findtext(".//dfe:protCTe/dfe:infProt/dfe:dhRecbto", namespaces=ns) or "",
         }
 
+    if tipo == "NFSE":
+        ns = {"dfe": NAMESPACE_NFSE}
+        inf_nfse = raiz.find(".//dfe:infNFSe", namespaces=ns)
+        return {
+            "numero": raiz.findtext(".//dfe:nNFSe", namespaces=ns) or "",
+            "serie": raiz.findtext(".//dfe:DPS/dfe:infDPS/dfe:serie", namespaces=ns) or "",
+            "data_emissao": raiz.findtext(".//dfe:DPS/dfe:infDPS/dfe:dhEmi", namespaces=ns) or "",
+            "valor": raiz.findtext(".//dfe:infNFSe/dfe:valores/dfe:vLiq", namespaces=ns)
+            or raiz.findtext(".//dfe:DPS/dfe:infDPS/dfe:valores/dfe:vServPrest/dfe:vServ", namespaces=ns)
+            or "",
+            "protocolo": raiz.findtext(".//dfe:nDFSe", namespaces=ns) or "",
+            "cstat": raiz.findtext(".//dfe:cStat", namespaces=ns) or "",
+            "motivo": raiz.findtext(".//dfe:xMotivo", namespaces=ns) or "",
+            "data_recebimento": raiz.findtext(".//dfe:dhProc", namespaces=ns) or "",
+            "chave": (inf_nfse.get("Id") if inf_nfse is not None else "").removeprefix("NFS"),
+        }
+
     ns = {"dfe": NAMESPACE_NFE}
     return {
         "numero": raiz.findtext(".//dfe:ide/dfe:nNF", namespaces=ns) or "",
@@ -144,23 +166,24 @@ def reconstruir_registro_de_saida() -> None:
         if "-lote" in nome or "-retorno" in nome:
             continue
         chave = arquivo.stem
-        if len(chave) != 44 or not chave.isdigit() or chave in por_chave:
+        if len(chave) not in {44, 50} or not chave.isdigit() or chave in por_chave:
             continue
         tipo_modelo = chave[20:22]
-        tipo = {"55": "NFE", "65": "NFCE", "57": "CTE", "58": "MDFE"}.get(tipo_modelo, "")
+        tipo = "NFSE" if len(chave) == 50 else {"55": "NFE", "65": "NFCE", "57": "CTE", "58": "MDFE"}.get(tipo_modelo, "")
         pdf = arquivo.with_suffix(".pdf")
         dados_xml = {}
         try:
             dados_xml = extrair_dados_xml_emitido(arquivo.read_text(encoding="utf-8-sig"), tipo)
         except Exception:
             dados_xml = {}
+        chave_registro = dados_xml.get("chave") or chave
         por_chave[chave] = {
             "tipo": tipo,
             "emitente": "",
             "emitente_nome": "",
-            "chave": chave,
-            "numero": dados_xml.get("numero") or str(int(chave[25:34])),
-            "serie": dados_xml.get("serie") or str(int(chave[22:25])),
+            "chave": chave_registro,
+            "numero": dados_xml.get("numero") or (str(int(chave[25:34])) if len(chave) == 44 else ""),
+            "serie": dados_xml.get("serie") or (str(int(chave[22:25])) if len(chave) == 44 else ""),
             "protocolo": dados_xml.get("protocolo", ""),
             "data_emissao": dados_xml.get("data_emissao", ""),
             "valor": dados_xml.get("valor", ""),
@@ -201,8 +224,42 @@ def executar_fluxo(
     emitente: str | None = None,
 ) -> dict:
     tipo = (tipo or "nfce").lower()
-    if tipo not in {"nfce", "nfe", "mdfe", "cte"}:
+    if tipo not in {"nfce", "nfe", "mdfe", "cte", "nfse"}:
         return {"ok": False, "erro": f"Tipo de documento desconhecido: {tipo}"}
+
+    if tipo == "nfse":
+        comandos_nfse = {
+            "gerar": [],
+            "assinar_validar": ["--assinar", "--validar-schema"],
+            "transmitir": ["--transmitir"],
+            "email": ["--transmitir"],
+        }
+        if acao not in comandos_nfse:
+            return {"ok": False, "erro": f"Acao desconhecida: {acao}"}
+        comando = [sys.executable, str(SCRIPT_NFSE), *comandos_nfse[acao]]
+        if numero:
+            comando.extend(["--numero", numero])
+        if emitente:
+            comando.extend(["--emitente", emitente])
+        processo = subprocess.run(
+            comando,
+            cwd=BASE_DIR,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        saida = processo.stdout
+        erro = processo.stderr
+        chave = extrair_chave_saida_nfse(saida)
+        return {
+            "ok": processo.returncode == 0,
+            "codigo": processo.returncode,
+            "comando": " ".join(comando),
+            "saida": saida,
+            "erro": erro,
+            "chave": chave,
+            "links": montar_links(chave),
+        }
 
     base = ["--tipo", tipo]
     validar = base + ["--assinar", "--validar-schema"]
@@ -249,6 +306,15 @@ def executar_fluxo(
 
 def extrair_chave_saida(saida: str) -> str | None:
     marcador = "XML final salvo em:"
+    for linha in saida.splitlines():
+        if marcador in linha:
+            caminho = linha.split(marcador, 1)[1].strip()
+            return Path(caminho).stem
+    return None
+
+
+def extrair_chave_saida_nfse(saida: str) -> str | None:
+    marcador = "NFS-e autorizada salva em:"
     for linha in saida.splitlines():
         if marcador in linha:
             caminho = linha.split(marcador, 1)[1].strip()
