@@ -12,6 +12,7 @@ import argparse
 import base64
 import gzip
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,8 +58,11 @@ FUSO_BRASIL = timezone(timedelta(hours=-3))
 VERSAO_NFSE = "1.01"
 AMBIENTE_RESTRITO = "2"
 URL_SEFIN_RESTRITA = "https://sefin.producaorestrita.nfse.gov.br/SefinNacional"
+URL_CONSULTA_NFSE_RESTRITA = "https://www.producaorestrita.nfse.gov.br/ConsultaPublica/"
 REGISTRO_DFE = BASE_DIR / "dfe_emitidos.json"
 NAMESPACE_NFSE = "http://www.sped.fazenda.gov.br/nfse"
+TENTATIVAS_TRANSMISSAO = 3
+INTERVALO_TENTATIVA_SEGUNDOS = 3
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,259 @@ def dados_nfse_xml(xml: str) -> dict:
         "cstat": raiz.findtext(".//nfse:cStat", namespaces=ns) or "",
         "motivo": raiz.findtext(".//nfse:xMotivo", namespaces=ns) or "",
     }
+
+
+def gerar_pdf_nfse(xml: str, caminho_pdf: Path) -> None:
+    """Gera DANFS-e em A4 para a NFS-e Nacional autorizada."""
+    from fpdf import FPDF
+    import qrcode
+
+    raiz = etree.fromstring(xml.encode("utf-8"))
+    ns = {"nfse": NAMESPACE_NFSE}
+
+    def texto(xpath: str, padrao: str = "") -> str:
+        return raiz.findtext(xpath, namespaces=ns) or padrao
+
+    def dinheiro(valor: str) -> str:
+        try:
+            return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except ValueError:
+            return valor
+
+    def doc_formatado(valor: str) -> str:
+        numeros = somente_digitos(valor)
+        if len(numeros) == 14:
+            return f"{numeros[:2]}.{numeros[2:5]}.{numeros[5:8]}/{numeros[8:12]}-{numeros[12:]}"
+        if len(numeros) == 11:
+            return f"{numeros[:3]}.{numeros[3:6]}.{numeros[6:9]}-{numeros[9:]}"
+        return valor
+
+    dados = dados_nfse_xml(xml)
+    chave = dados.get("chave", "")
+    numero_nfse = dados.get("numero", "")
+    numero_dps = texto(".//nfse:DPS/nfse:infDPS/nfse:nDPS")
+    serie = texto(".//nfse:DPS/nfse:infDPS/nfse:serie")
+    prestador = texto(".//nfse:emit/nfse:xNome") or texto(".//nfse:DPS/nfse:infDPS/nfse:prest/nfse:xNome")
+    cnpj_prestador = texto(".//nfse:emit/nfse:CNPJ") or texto(".//nfse:DPS/nfse:infDPS/nfse:prest/nfse:CNPJ")
+    tomador = texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:xNome")
+    cnpj_tomador = texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:CNPJ") or texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:CPF")
+    email_prestador = texto(".//nfse:emit/nfse:email") or texto(".//nfse:DPS/nfse:infDPS/nfse:prest/nfse:email")
+    telefone_prestador = texto(".//nfse:emit/nfse:fone") or texto(".//nfse:DPS/nfse:infDPS/nfse:prest/nfse:fone")
+    email_tomador = texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:email")
+    telefone_tomador = texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:fone")
+    endereco_prestador = ", ".join(
+        item
+        for item in (
+            texto(".//nfse:emit/nfse:enderNac/nfse:xLgr"),
+            texto(".//nfse:emit/nfse:enderNac/nfse:nro"),
+            texto(".//nfse:emit/nfse:enderNac/nfse:xBairro"),
+        )
+        if item
+    )
+    endereco_tomador = ", ".join(
+        item
+        for item in (
+            texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:end/nfse:xLgr"),
+            texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:end/nfse:nro"),
+            texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:end/nfse:xBairro"),
+        )
+        if item
+    )
+    municipio_prestador = f"{texto('.//nfse:emit/nfse:enderNac/nfse:cMun')} / {texto('.//nfse:emit/nfse:enderNac/nfse:UF')}".strip(" /")
+    municipio_tomador = texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:end/nfse:endNac/nfse:cMun")
+    cep_prestador = texto(".//nfse:emit/nfse:enderNac/nfse:CEP")
+    cep_tomador = texto(".//nfse:DPS/nfse:infDPS/nfse:toma/nfse:end/nfse:endNac/nfse:CEP")
+    descricao = texto(".//nfse:DPS/nfse:infDPS/nfse:serv/nfse:cServ/nfse:xDescServ")
+    codigo_servico = texto(".//nfse:DPS/nfse:infDPS/nfse:serv/nfse:cServ/nfse:cTribNac")
+    codigo_municipal = texto(".//nfse:DPS/nfse:infDPS/nfse:serv/nfse:cServ/nfse:cTribMun") or "-"
+    codigo_nbs = texto(".//nfse:DPS/nfse:infDPS/nfse:serv/nfse:cServ/nfse:cNBS")
+    municipio = texto(".//nfse:xLocPrestacao") or texto(".//nfse:xLocEmi")
+    uf_prestacao = texto(".//nfse:emit/nfse:enderNac/nfse:UF")
+    local_prestacao = f"{municipio} / {uf_prestacao}".strip(" /")
+    valor = dados.get("valor", "")
+    protocolo = dados.get("protocolo", "")
+    emissao = dados.get("data_emissao", "")
+    processamento = dados.get("data_recebimento", "")
+    competencia = texto(".//nfse:DPS/nfse:infDPS/nfse:dCompet")
+    tributacao_issqn = texto(".//nfse:DPS/nfse:infDPS/nfse:valores/nfse:trib/nfse:tribMun/nfse:tribISSQN")
+    retencao_issqn = texto(".//nfse:DPS/nfse:infDPS/nfse:valores/nfse:trib/nfse:tribMun/nfse:tpRetISSQN")
+    percentual_tributos = texto(".//nfse:DPS/nfse:infDPS/nfse:valores/nfse:trib/nfse:totTrib/nfse:pTotTribSN")
+    xtrib = texto(".//nfse:xTribNac")
+    nbs_desc = texto(".//nfse:xNBS")
+    url_consulta = f"{URL_CONSULTA_NFSE_RESTRITA}?chave={chave}" if chave else URL_CONSULTA_NFSE_RESTRITA
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_margins(10, 10, 10)
+    pdf.set_auto_page_break(auto=False)
+    pdf.add_page()
+    pdf.set_draw_color(35, 35, 35)
+    pdf.set_line_width(0.18)
+
+    logo_sc = BASE_DIR / "LogoSC.png"
+    logo_porto_alegre = BASE_DIR / "portoalegre.jpg"
+
+    def rect(x: float, y: float, w: float, h: float) -> None:
+        pdf.rect(x, y, w, h)
+
+    def texto_bloco(x: float, y0: float, w: float, titulo: str, valor_campo: str = "", tamanho: float = 7, negrito: bool = False, altura_linha: float = 3.0) -> None:
+        pdf.set_xy(x, y0)
+        pdf.set_font("Helvetica", "B", 5.8)
+        pdf.cell(w, 2.6, titulo.upper())
+        if valor_campo:
+            pdf.set_xy(x, y0 + 2.9)
+            pdf.set_font("Helvetica", "B" if negrito else "", tamanho)
+            pdf.multi_cell(w, altura_linha, valor_campo[:360])
+
+    def quebra_email(valor: str) -> str:
+        return valor.replace("@", "@\n") if len(valor) > 26 else valor
+
+    def secao(y0: float, titulo: str, altura: float) -> None:
+        pdf.set_fill_color(232, 232, 232)
+        pdf.rect(10, y0, 190, 5.2, style="F")
+        rect(10, y0, 190, altura)
+        pdf.set_xy(11.5, y0 + 1.15)
+        pdf.set_font("Helvetica", "B", 7.4)
+        pdf.cell(187, 3, titulo.upper())
+
+    def campo(x: float, y0: float, w: float, titulo: str, valor_campo: str = "", tamanho: float = 7, negrito: bool = False) -> None:
+        texto_bloco(x + 1.5, y0 + 1.3, w - 3, titulo, valor_campo, tamanho, negrito)
+
+    y = 8
+    rect(10, y, 190, 25)
+    if logo_sc.exists():
+        pdf.image(str(logo_sc), x=13.2, y=y + 3.2, w=14.5)
+    pdf.set_xy(29, y + 3.2)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(112, 5.5, "DANFSe v1.0", align="C")
+    pdf.set_xy(29, y + 10.3)
+    pdf.set_font("Helvetica", "B", 8.2)
+    pdf.cell(112, 4.5, "Documento Auxiliar da NFS-e", align="C")
+    if logo_porto_alegre.exists():
+        pdf.image(str(logo_porto_alegre), x=143.2, y=y + 3.2, w=14.5)
+    pdf.set_xy(162, y + 2.8)
+    pdf.set_font("Helvetica", "B", 6.6)
+    pdf.multi_cell(36, 3.2, "PREFEITURA DE PORTO\nALEGRE", align="C")
+    pdf.set_xy(162, y + 14.7)
+    pdf.set_font("Helvetica", "", 5.6)
+    pdf.multi_cell(36, 2.8, "SECRETARIA DA FAZENDA", align="C")
+    y += 25
+
+    rect(10, y, 190, 33)
+    rect(166, y, 34, 33)
+    pdf.line(10, y + 12, 166, y + 12)
+    pdf.line(10, y + 23, 166, y + 23)
+    pdf.line(58, y + 12, 58, y + 33)
+    pdf.line(106, y + 12, 106, y + 33)
+    texto_bloco(11.5, y + 2, 153, "Chave de Acesso da NFS-e", chave, 7.1, True)
+    texto_bloco(11.5, y + 13.3, 45, "Numero da NFS-e", numero_nfse, 7.1, True)
+    texto_bloco(59.5, y + 13.3, 45, "Competencia da NFS-e", competencia, 7.1)
+    texto_bloco(107.5, y + 13.3, 57, "Data e Hora de Emissao da NFS-e", emissao[:19].replace("T", " "), 7.1)
+    texto_bloco(11.5, y + 24.3, 45, "Numero da DPS", numero_dps, 7.1)
+    texto_bloco(59.5, y + 24.3, 45, "Serie da DPS", serie, 7.1)
+    texto_bloco(107.5, y + 24.3, 57, "Data e Hora de Emissao da DPS", emissao[:19].replace("T", " "), 7.1)
+    imagem_qr = qrcode.make(url_consulta)
+    with TemporaryDirectory() as temp_dir:
+        caminho_qr = Path(temp_dir) / "qr_nfse.png"
+        imagem_qr.save(caminho_qr)
+        pdf.image(str(caminho_qr), x=170.7, y=y + 2.2, w=24)
+    pdf.set_xy(166.5, y + 26)
+    pdf.set_font("Helvetica", "", 5)
+    pdf.multi_cell(33, 2.2, "A autenticidade pode ser verificada pelo QR Code ou chave de acesso.", align="C")
+    y += 33
+
+    secao(y, "Emitente da NFS-e", 36)
+    pdf.set_xy(11.5, y + 6.2)
+    pdf.set_font("Helvetica", "B", 7.2)
+    pdf.cell(187, 3, "PRESTADOR DO SERVICO")
+    campo(10, y + 9, 68, "Nome / Nome Empresarial", prestador, 7.2, True)
+    campo(78, y + 9, 36, "CNPJ / CPF / NIF", doc_formatado(cnpj_prestador), 7)
+    campo(114, y + 9, 36, "Inscricao Municipal", "-", 7)
+    campo(150, y + 9, 50, "Telefone", telefone_prestador, 7)
+    campo(10, y + 20, 88, "Endereco", endereco_prestador, 7)
+    campo(98, y + 20, 35, "Municipio", municipio_prestador or local_prestacao, 7)
+    campo(133, y + 20, 25, "CEP", cep_prestador, 7)
+    campo(158, y + 20, 42, "E-mail", quebra_email(email_prestador), 6.2)
+    campo(10, y + 29, 92, "Simples Nacional na Data de Competencia", "Optante - MicroEmpresa EPP", 6.7, True)
+    campo(102, y + 29, 98, "Regime de Apuracao Tributaria pelo SN", "Federais e Municipal pelo SN", 6.7)
+    y += 36
+
+    secao(y, "Tomador do Servico", 27)
+    campo(10, y + 4, 78, "Nome / Nome Empresarial", tomador, 7.2, True)
+    campo(88, y + 4, 40, "CNPJ / CPF / NIF", doc_formatado(cnpj_tomador), 7)
+    campo(128, y + 4, 34, "Inscricao Municipal", "-", 7)
+    campo(162, y + 4, 38, "Telefone", telefone_tomador, 7)
+    campo(10, y + 16, 88, "Endereco", endereco_tomador, 7)
+    campo(98, y + 16, 34, "Municipio", municipio_tomador, 7)
+    campo(132, y + 16, 25, "CEP", cep_tomador, 7)
+    campo(157, y + 16, 43, "E-mail", quebra_email(email_tomador), 6.2)
+    y += 27
+
+    rect(10, y, 190, 7)
+    pdf.set_xy(10, y + 1.5)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(190, 3, "INTERMEDIARIO DO SERVICO NAO IDENTIFICADO NA NFS-e", align="C")
+    y += 7
+
+    secao(y, "Servico Prestado", 27)
+    campo(10, y + 6, 58, "Codigo de Tributacao Nacional", f"{codigo_servico} - {xtrib}", 6.7)
+    campo(68, y + 6, 46, "Codigo de Tributacao Municipal", codigo_municipal, 7)
+    campo(114, y + 6, 42, "Local da Prestacao", local_prestacao, 7)
+    campo(156, y + 6, 44, "Pais da Prestacao", "-", 7)
+    campo(10, y + 17, 190, "Descricao do Servico", descricao, 6.7)
+    y += 27
+
+    secao(y, "Tributacao Municipal", 37)
+    campo(10, y + 5, 42, "Tributacao do ISSQN", "Operacao Tributavel" if tributacao_issqn == "1" else tributacao_issqn, 6.6)
+    campo(52, y + 5, 58, "Pais Resultado da Prestacao do Servico", "-", 6.6)
+    campo(110, y + 5, 48, "Municipio de Incidencia do ISSQN", local_prestacao, 6.6)
+    campo(158, y + 5, 42, "Regime Especial de Tributacao", "Nenhum", 6.6)
+    campo(10, y + 17, 42, "Tipo de Imunidade", "-", 6.6)
+    campo(52, y + 17, 58, "Suspensao da Exigibilidade do ISSQN", "Nao", 6.6)
+    campo(110, y + 17, 48, "Retencao do ISSQN", "Nao Retido" if retencao_issqn == "1" else retencao_issqn, 6.6)
+    campo(158, y + 17, 42, "ISSQN Apurado", "-", 6.6)
+    campo(10, y + 29, 42, "Valor do Servico", f"R$ {dinheiro(valor)}", 6.6)
+    campo(52, y + 29, 58, "Aliquota Aplicada", "-", 6.6)
+    campo(110, y + 29, 48, "BC ISSQN", "-", 6.6)
+    campo(158, y + 29, 42, "Beneficio Municipal", "-", 6.6)
+    y += 37
+
+    secao(y, "Tributacao Federal", 22)
+    campo(10, y + 5, 42, "IRRF", "-", 6.6)
+    campo(52, y + 5, 58, "Contribuicao Previdenciaria-Retida", "-", 6.6)
+    campo(110, y + 5, 48, "Contribuicoes Sociais-Retidas", "-", 6.6)
+    campo(10, y + 15, 42, "PIS - Debito Apuracao Propria", "-", 6.6)
+    campo(52, y + 15, 58, "COFINS-Debito Apuracao Propria", "-", 6.6)
+    campo(110, y + 15, 88, "Descricao Contrib. Sociais-Retidas", "PIS/COFINS/CSLL Nao Retidos", 6.6)
+    y += 22
+
+    secao(y, "Valor Total da NFS-e", 24)
+    campo(10, y + 5, 42, "Valor do Servico", f"R$ {dinheiro(valor)}", 6.8, True)
+    campo(52, y + 5, 48, "Desconto Condicionado", "-", 6.6)
+    campo(100, y + 5, 48, "Desconto Incondicionado", "-", 6.6)
+    campo(148, y + 5, 52, "ISSQN Retido", "-", 6.6)
+    campo(10, y + 16, 62, "Total Tributacao Federal", "-", 6.6)
+    campo(72, y + 16, 56, "PIS/COFINS Retidos", "-", 6.6)
+    campo(148, y + 16, 52, "Valor Liquido da NFS-e", f"R$ {dinheiro(valor)}", 6.8, True)
+    y += 24
+
+    secao(y, "Totais Aproximados dos Tributos", 14)
+    campo(10, y + 5, 62, "Federais", f"{percentual_tributos}%" if percentual_tributos else "-", 6.6)
+    campo(72, y + 5, 62, "Estaduais", "-", 6.6)
+    campo(134, y + 5, 62, "Municipais", "-", 6.6)
+    y += 14
+
+    secao(y, "Informacoes Complementares", 27)
+    complemento = f"NBS: {codigo_nbs} - {nbs_desc}\nConsulta: {url_consulta}"
+    campo(10, y + 5, 190, "", complemento, 6.2)
+    pdf.set_xy(10, y + 15)
+    pdf.set_text_color(20, 20, 20)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(190, 8, "AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL", align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(10, 280)
+    pdf.set_font("Helvetica", "", 6)
+    pdf.cell(190, 4, "Desenvolvido por SCFacil", align="R")
+    pdf.output(str(caminho_pdf))
 
 
 def montar_id_dps(codigo_municipio: str, documento_prestador: str, serie: str, numero: int) -> str:
@@ -323,20 +580,36 @@ def transmitir_dps(
     timeout: int = 60,
 ) -> tuple[int, dict]:
     payload = {"dpsXmlGZipB64": compactar_base64(xml_assinado)}
-    with TemporaryDirectory() as temp:
-        cert = preparar_certificado_requests(caminho_certificado, senha_certificado, Path(temp))
-        resposta = requests.post(
-            f"{URL_SEFIN_RESTRITA}/nfse",
-            json=payload,
-            cert=cert,
-            timeout=timeout,
-            headers={"Accept": "application/json"},
-        )
-    try:
-        conteudo = resposta.json()
-    except ValueError:
-        conteudo = {"raw": resposta.text}
-    return resposta.status_code, conteudo
+    endpoint = f"{URL_SEFIN_RESTRITA}/nfse"
+    erro_final = None
+    for tentativa in range(1, TENTATIVAS_TRANSMISSAO + 1):
+        try:
+            print(f"Tentativa {tentativa}/{TENTATIVAS_TRANSMISSAO} em {endpoint}")
+            with TemporaryDirectory() as temp:
+                cert = preparar_certificado_requests(caminho_certificado, senha_certificado, Path(temp))
+                resposta = requests.post(
+                    endpoint,
+                    json=payload,
+                    cert=cert,
+                    timeout=timeout,
+                    headers={"Accept": "application/json"},
+                )
+            try:
+                conteudo = resposta.json()
+            except ValueError:
+                conteudo = {"raw": resposta.text}
+            return resposta.status_code, conteudo
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.RequestException, OSError) as erro:
+            erro_final = erro
+            if tentativa < TENTATIVAS_TRANSMISSAO:
+                time.sleep(INTERVALO_TENTATIVA_SEGUNDOS)
+                continue
+            raise ConnectionError(
+                f"Erro de conexao ao transmitir NFSE para {endpoint} "
+                f"apos {TENTATIVAS_TRANSMISSAO} tentativas: {erro}"
+            ) from erro
+
+    raise ConnectionError(f"Erro de conexao na transmissao da NFSE: {erro_final}")
 
 
 def gerar_arquivos(
@@ -391,12 +664,52 @@ def gerar_arquivos(
         if not assinar:
             raise ValueError("Use --assinar junto com --transmitir.")
         print("Transmitindo DPS para a Sefin Nacional em producao restrita...")
-        status_http, retorno = transmitir_dps(
-            xml_assinado=xml_validar,
-            caminho_certificado=Path(certificado.get("caminho", "")),
-            senha_certificado=str(certificado.get("senha", "")),
-        )
         caminho_retorno = pasta / f"dps_nfse_{numero:015d}_retorno.json"
+        try:
+            status_http, retorno = transmitir_dps(
+                xml_assinado=xml_validar,
+                caminho_certificado=Path(certificado.get("caminho", "")),
+                senha_certificado=str(certificado.get("senha", "")),
+            )
+        except Exception as erro:
+            motivo_erro = "Erro de conexão com a API nacional da NFS-e. Nenhuma autorização foi retornada."
+            retorno = {
+                "tipo": "erro_conexao",
+                "endpoint": f"{URL_SEFIN_RESTRITA}/nfse",
+                "tentativas": TENTATIVAS_TRANSMISSAO,
+                "erro": str(erro),
+                "registrado_em": datetime.now(FUSO_BRASIL).isoformat(),
+            }
+            caminho_retorno.write_text(json.dumps(retorno, ensure_ascii=False, indent=2), encoding="utf-8")
+            registrar_dfe(
+                {
+                    "tipo": "NFSE",
+                    "emitente": emitente_codigo,
+                    "emitente_nome": (emitente_config.get("dados") or {}).get("nome", ""),
+                    "id_dps": dps.infDPS.Id,
+                    "chave": "",
+                    "numero": str(numero),
+                    "serie": str((emitente_config.get("nfse") or {}).get("serie", "1")),
+                    "protocolo": "",
+                    "data_emissao": dps.infDPS.dhEmi,
+                    "valor": (dps.infDPS.valores.vServPrest.vServ if dps.infDPS.valores and dps.infDPS.valores.vServPrest else ""),
+                    "status": "erro_conexao",
+                    "cstat": "ERRO_CONEXAO",
+                    "erro": motivo_erro,
+                    "motivo": motivo_erro,
+                    "data_recebimento": "",
+                    "xml": "",
+                    "pdf": "",
+                    "retorno": str(caminho_retorno),
+                    "lote": str(caminho_assinado or caminho_xml),
+                    "endpoint": f"{URL_SEFIN_RESTRITA}/nfse",
+                    "tentativas": TENTATIVAS_TRANSMISSAO,
+                    "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
+                }
+            )
+            print(f"Transmissao nao concluida: {motivo_erro}")
+            raise SystemExit(1) from erro
+
         caminho_retorno.write_text(json.dumps(retorno, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Retorno salvo em: {caminho_retorno}")
 
@@ -415,6 +728,9 @@ def gerar_arquivos(
             caminho_nfse = pasta / nome_nfse
             caminho_nfse.write_text(xml_nfse, encoding="utf-8")
             print(f"NFS-e autorizada salva em: {caminho_nfse}")
+            caminho_pdf = caminho_nfse.with_suffix(".pdf")
+            gerar_pdf_nfse(xml_nfse, caminho_pdf)
+            print(f"DANFS-e salvo em: {caminho_pdf}")
             registrar_dfe(
                 {
                     "tipo": "NFSE",
@@ -433,7 +749,7 @@ def gerar_arquivos(
                     "motivo": dados_nfse.get("motivo", ""),
                     "data_recebimento": dados_nfse.get("data_recebimento", ""),
                     "xml": str(caminho_nfse),
-                    "pdf": "",
+                    "pdf": str(caminho_pdf),
                     "retorno": str(caminho_retorno),
                     "lote": str(caminho_assinado or caminho_xml),
                     "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),

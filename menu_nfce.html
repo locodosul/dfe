@@ -22,13 +22,15 @@
     header { background: var(--panel); border-bottom: 1px solid var(--line); padding: 18px 24px; }
     h1 { margin: 0; font-size: 22px; }
     header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
-    main { max-width: 1180px; margin: 0 auto; padding: 22px; }
+    main { max-width: 1360px; margin: 0 auto; padding: 22px; }
     .status { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
     .card, .step { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
     .card { padding: 14px; }
     .card strong { display: block; font-size: 13px; color: var(--muted); }
     .card span { display: block; margin-top: 6px; font-size: 16px; font-weight: 700; }
-    .layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; align-items: start; }
+    .layout { display: grid; gap: 18px; align-items: start; }
+    .top-layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; align-items: start; }
+    .bottom-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .55fr); gap: 18px; align-items: start; }
     .steps { display: grid; gap: 12px; }
     .step { display: grid; grid-template-columns: 42px 1fr auto; gap: 12px; align-items: center; padding: 14px; }
     .badge { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); font-weight: 700; }
@@ -44,7 +46,7 @@
     .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
     .ok { color: var(--ok); }
     .bad { color: var(--bad); }
-    .grid-card { margin-top: 12px; overflow: hidden; }
+    .grid-card { overflow: hidden; }
     .grid-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
     .grid-head h2 { margin: 0; font-size: 16px; }
     .grid-wrap { overflow: auto; max-height: 360px; }
@@ -55,14 +57,16 @@
     tr[data-pdf] { cursor: pointer; }
     tr.status-autorizado td:first-child { border-left: 4px solid var(--ok); }
     tr.status-erro td:first-child { border-left: 4px solid var(--bad); }
+    tr.status-erro_conexao td:first-child { border-left: 4px solid var(--bad); }
     .erro { color: var(--bad); max-width: 280px; }
     .status-pill { display: inline-block; border-radius: 999px; padding: 2px 7px; font-weight: 700; font-size: 11px; background: #eef2f7; }
     .status-pill.autorizado { color: var(--ok); background: #e9f7f1; }
     .status-pill.erro { color: var(--bad); background: #fff0ee; }
+    .status-pill.erro_conexao { color: var(--bad); background: #fff0ee; }
     ul { margin: 8px 0 0; padding-left: 18px; }
     li { margin: 4px 0; }
     @media (max-width: 860px) {
-      .status, .layout { grid-template-columns: 1fr; }
+      .status, .top-layout, .bottom-layout { grid-template-columns: 1fr; }
       .step { grid-template-columns: 36px 1fr; }
       .step button { grid-column: 1 / -1; width: 100%; }
     }
@@ -83,56 +87,36 @@
     </section>
 
     <section class="layout">
-      <div class="steps">
-        <article class="step">
-          <div class="badge">1</div>
-          <div><h2>Gerar XML base</h2><p>Monta NF-e, NFC-e, MDF-e ou CT-e em homologacao sem assinatura.</p></div>
-          <button class="secondary" data-acao="gerar">Executar</button>
-        </article>
-        <article class="step">
-          <div class="badge">2</div>
-          <div><h2>Assinar e validar</h2><p>Assina com certificado e valida o schema, sem gerar PDF antes da autorizacao.</p></div>
-          <button class="secondary" data-acao="assinar_validar">Executar</button>
-        </article>
-        <article class="step">
-          <div class="badge">3</div>
-          <div><h2>Transmitir e Imprimir</h2><p>Envia para SEFAZ/RS, salva chave.xml/chave.pdf autorizado e abre a impressao.</p></div>
-          <button data-acao="transmitir">Executar</button>
-        </article>
-        <article class="step">
-          <div class="badge">4</div>
-          <div><h2>Transmitir e enviar por e-mail</h2><p>Autoriza o documento e envia XML/PDF para os destinatarios configurados.</p></div>
-          <button data-acao="email">Executar</button>
-        </article>
-        <section class="card grid-card">
-          <div class="grid-head">
-            <h2>DF-e emitidos e transmitidos</h2>
-            <button class="secondary" type="button" id="atualizarGrid">Atualizar</button>
-          </div>
-          <div class="grid-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Status</th>
-                  <th>Tipo</th>
-                  <th>Numero</th>
-                  <th>Serie</th>
-                  <th>Emissao</th>
-                  <th>Valor</th>
-                  <th>Chave</th>
-                  <th>Protocolo</th>
-                  <th>Erro</th>
-                </tr>
-              </thead>
-              <tbody id="gridDocumentos">
-                <tr><td colspan="9">Carregando...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </div>
+      <section class="top-layout">
+        <div class="steps">
+          <article class="step">
+            <div class="badge">1</div>
+            <div><h2>Gerar XML base</h2><p>Monta NF-e, NFC-e, MDF-e ou CT-e em homologacao sem assinatura.</p></div>
+            <button class="secondary" data-acao="gerar">Executar</button>
+          </article>
+          <article class="step">
+            <div class="badge">2</div>
+            <div><h2>Assinar e validar</h2><p>Assina com certificado e valida o schema, sem gerar PDF antes da autorizacao.</p></div>
+            <button class="secondary" data-acao="assinar_validar">Executar</button>
+          </article>
+          <article class="step">
+            <div class="badge">3</div>
+            <div><h2>Transmitir e visualizar PDF</h2><p>Autoriza o documento, salva XML/PDF e abre a visualizacao quando houver PDF.</p></div>
+            <button data-acao="transmitir">Executar</button>
+          </article>
+          <article class="step">
+            <div class="badge">4</div>
+            <div><h2>Transmitir e enviar por e-mail</h2><p>Autoriza o documento e envia XML/PDF para os destinatarios configurados.</p></div>
+            <button data-acao="email">Executar</button>
+          </article>
+          <article class="step" id="passoEncerrarMdfe" style="display: none;">
+            <div class="badge">5</div>
+            <div><h2>Encerrar MDF-e pendente</h2><p>Envia o evento de encerramento do MDF-e aberto indicado pela rejeicao.</p></div>
+            <button class="secondary" data-acao="encerrar_mdfe">Executar</button>
+          </article>
+        </div>
 
-      <aside class="card">
+        <aside class="card">
         <h2>Executor</h2>
         <p class="note">Esta tela executa o Python local via servidor em <strong>http://127.0.0.1:8765</strong>.</p>
         <label for="tipoDocumento">Documento fiscal</label>
@@ -147,12 +131,47 @@
         <select id="emitente"></select>
         <label for="numero">Numero manual opcional</label>
         <input id="numero" type="number" min="1" placeholder="Ex.: 10">
-        <label>Resultado</label>
-        <pre id="log">Aguardando acao.</pre>
-        <div class="links" id="links"></div>
-        <h3>Ultimos arquivos</h3>
-        <ul id="arquivos"></ul>
-      </aside>
+        </aside>
+      </section>
+
+      <section class="card grid-card">
+        <div class="grid-head">
+          <h2>DF-e emitidos e transmitidos</h2>
+          <button class="secondary" type="button" id="atualizarGrid">Atualizar</button>
+        </div>
+        <div class="grid-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Tipo</th>
+                <th>Numero</th>
+                <th>Serie</th>
+                <th>Emissao</th>
+                <th>Valor</th>
+                <th>Chave</th>
+                <th>Protocolo</th>
+                <th>Erro</th>
+              </tr>
+            </thead>
+            <tbody id="gridDocumentos">
+              <tr><td colspan="9">Carregando...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="bottom-layout">
+        <section class="card">
+          <h2>Resultado</h2>
+          <pre id="log">Aguardando acao.</pre>
+          <div class="links" id="links"></div>
+        </section>
+        <section class="card">
+          <h2>Ultimos arquivos</h2>
+          <ul id="arquivos"></ul>
+        </section>
+      </section>
     </section>
   </main>
 
@@ -167,9 +186,14 @@
     const emitente = document.querySelector("#emitente");
     const gridDocumentos = document.querySelector("#gridDocumentos");
     const atualizarGrid = document.querySelector("#atualizarGrid");
+    const passoEncerrarMdfe = document.querySelector("#passoEncerrarMdfe");
 
     async function carregarStatus() {
-      const resposta = await fetch("/api/status");
+      const params = new URLSearchParams({
+        tipo: tipoDocumento.value,
+        emitente: emitente.value || ""
+      });
+      const resposta = await fetch(`/api/status?${params}`);
       const dados = await resposta.json();
       ultimoNumero.textContent = dados.ultimo_numero;
       if (!emitente.options.length) {
@@ -246,13 +270,6 @@
       botao.disabled = true;
       links.innerHTML = "";
       log.textContent = "Executando...";
-      let janelaImpressao = null;
-      if (acao === "transmitir") {
-        janelaImpressao = window.open("about:blank", "_blank");
-        if (janelaImpressao) {
-          janelaImpressao.document.write("<p style='font: 16px Arial; padding: 24px'>Aguardando autorizacao do documento...</p>");
-        }
-      }
       try {
         const resposta = await fetch("/api/executar", {
           method: "POST",
@@ -281,22 +298,11 @@
             links.appendChild(a);
           }
           if (acao === "transmitir" && dados.links.pdf) {
-            const arquivo = dados.links.pdf.replace(/^\/saida\//, "");
-            const urlImpressao = `/imprimir?arquivo=${encodeURIComponent(arquivo)}`;
-            if (janelaImpressao) {
-              janelaImpressao.location.href = urlImpressao;
-            } else {
-              window.open(urlImpressao, "_blank");
-            }
-          } else if (janelaImpressao) {
-            janelaImpressao.close();
+            window.open(dados.links.pdf, "_blank");
           }
         }
         await carregarStatus();
       } catch (erro) {
-        if (janelaImpressao) {
-          janelaImpressao.close();
-        }
         log.textContent = `Falha ao executar: ${erro}`;
       } finally {
         botao.disabled = false;
@@ -309,14 +315,15 @@
 
     atualizarGrid.addEventListener("click", carregarDocumentos);
 
-    tipoDocumento.addEventListener("change", () => {
+    async function atualizarDocumentoSelecionado() {
       documentoAtual.textContent = {
         nfce: "NFC-e",
         nfe: "NF-e",
         mdfe: "MDF-e",
-        cte: "CT-e"
-        ,nfse: "NFS-e"
+        cte: "CT-e",
+        nfse: "NFS-e"
       }[tipoDocumento.value];
+      passoEncerrarMdfe.style.display = tipoDocumento.value === "mdfe" ? "" : "none";
       if (tipoDocumento.value === "cte") {
         const btx = Array.from(emitente.options).find((option) => option.value === "btx");
         if (btx) {
@@ -328,7 +335,11 @@
           emitente.value = "sc";
         }
       }
-    });
+      await carregarStatus();
+    }
+
+    tipoDocumento.addEventListener("change", atualizarDocumentoSelecionado);
+    emitente.addEventListener("change", carregarStatus);
 
     carregarStatus();
   </script>

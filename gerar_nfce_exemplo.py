@@ -22,6 +22,7 @@ import hashlib
 import os
 import shutil
 import smtplib
+import time
 from email.message import EmailMessage
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone, timedelta
@@ -65,6 +66,8 @@ from nfelib.cte.bindings.v4_0.cte_tipos_basico_v4_00 import (
     Timp,
 )
 from requests import Session
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import RequestException, Timeout
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from zeep import Client
 from zeep.cache import SqliteCache
@@ -97,6 +100,12 @@ URL_AUTORIZACAO_MDFE_HOMOLOGACAO_SVRS = (
 WSDL_AUTORIZACAO_MDFE_HOMOLOGACAO_SVRS = (
     "https://mdfe-homologacao.svrs.rs.gov.br/ws/MDFeRecepcaoSinc/MDFeRecepcaoSinc.asmx?wsdl"
 )
+URL_EVENTO_MDFE_HOMOLOGACAO_SVRS = (
+    "https://mdfe-homologacao.svrs.rs.gov.br/ws/MDFeRecepcaoEvento/MDFeRecepcaoEvento.asmx"
+)
+WSDL_EVENTO_MDFE_HOMOLOGACAO_SVRS = (
+    "https://mdfe-homologacao.svrs.rs.gov.br/ws/MDFeRecepcaoEvento/MDFeRecepcaoEvento.asmx?wsdl"
+)
 URL_AUTORIZACAO_CTE_HOMOLOGACAO_SVRS = (
     "https://cte-homologacao.svrs.rs.gov.br/ws/CTeRecepcaoSincV4/CTeRecepcaoSincV4.asmx"
 )
@@ -120,8 +129,11 @@ NAMESPACE_NFE = "http://www.portalfiscal.inf.br/nfe"
 NAMESPACE_NFE_AUTORIZACAO = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4"
 NAMESPACE_MDFE = "http://www.portalfiscal.inf.br/mdfe"
 NAMESPACE_MDFE_AUTORIZACAO = "http://www.portalfiscal.inf.br/mdfe/wsdl/MDFeRecepcaoSinc"
+NAMESPACE_MDFE_EVENTO = "http://www.portalfiscal.inf.br/mdfe/wsdl/MDFeRecepcaoEvento"
 NAMESPACE_CTE = "http://www.portalfiscal.inf.br/cte"
 NAMESPACE_CTE_AUTORIZACAO = "http://www.portalfiscal.inf.br/cte/wsdl/CTeRecepcaoSincV4"
+TENTATIVAS_TRANSMISSAO = 3
+INTERVALO_TENTATIVA_SEGUNDOS = 3
 
 
 @dataclass(frozen=True)
@@ -191,6 +203,10 @@ def obter_config(config: dict, caminho: str, padrao=None):
             return padrao
         atual = atual[parte]
     return atual
+
+
+def somente_digitos(valor: str) -> str:
+    return "".join(caractere for caractere in str(valor) if caractere.isdigit())
 
 
 def listar_emitentes_config(config: dict) -> list[dict]:
@@ -795,6 +811,7 @@ def montar_cte_exemplo(
     set_text(".//cte:ide/cte:dhEmi", data_emissao.isoformat())
     set_text(".//cte:ide/cte:cDV", chave[-1])
     set_text(".//cte:ide/cte:tpAmb", AMBIENTE_HOMOLOGACAO)
+    set_text(".//cte:ide/cte:tpCTe", "0")
     set_text(".//cte:ide/cte:cMunEnv", emitente.municipio_codigo)
     set_text(".//cte:ide/cte:xMunEnv", emitente.municipio_nome.upper())
     set_text(".//cte:ide/cte:UFEnv", emitente.uf_sigla)
@@ -828,6 +845,39 @@ def montar_cte_exemplo(
             etree.SubElement(icms00, etree.QName(NAMESPACE_CTE, "vBC")).text = moeda(valor_servico)
             etree.SubElement(icms00, etree.QName(NAMESPACE_CTE, "pICMS")).text = moeda(tributacao.icms_aliquota)
             etree.SubElement(icms00, etree.QName(NAMESPACE_CTE, "vICMS")).text = moeda(valor_icms)
+
+    for grupo_complementar in cte.xpath(".//cte:infCteComp", namespaces=ns):
+        grupo_complementar.getparent().remove(grupo_complementar)
+
+    if cte.find(".//cte:infCTeNorm", namespaces=ns) is None:
+        inf_cte_norm = etree.Element(etree.QName(NAMESPACE_CTE, "infCTeNorm"))
+        inf_carga = etree.SubElement(inf_cte_norm, etree.QName(NAMESPACE_CTE, "infCarga"))
+        etree.SubElement(inf_carga, etree.QName(NAMESPACE_CTE, "vCarga")).text = "12000.00"
+        etree.SubElement(inf_carga, etree.QName(NAMESPACE_CTE, "proPred")).text = "TRANSPORTE RODOVIARIO"
+        inf_q = etree.SubElement(inf_carga, etree.QName(NAMESPACE_CTE, "infQ"))
+        etree.SubElement(inf_q, etree.QName(NAMESPACE_CTE, "cUnid")).text = "01"
+        etree.SubElement(inf_q, etree.QName(NAMESPACE_CTE, "tpMed")).text = "PESO BRUTO"
+        etree.SubElement(inf_q, etree.QName(NAMESPACE_CTE, "qCarga")).text = "12000.0000"
+
+        inf_doc = etree.SubElement(inf_cte_norm, etree.QName(NAMESPACE_CTE, "infDoc"))
+        inf_outros = etree.SubElement(inf_doc, etree.QName(NAMESPACE_CTE, "infOutros"))
+        etree.SubElement(inf_outros, etree.QName(NAMESPACE_CTE, "tpDoc")).text = "99"
+        etree.SubElement(inf_outros, etree.QName(NAMESPACE_CTE, "descOutros")).text = "DOCUMENTO DE TESTE"
+        etree.SubElement(inf_outros, etree.QName(NAMESPACE_CTE, "vDocFisc")).text = "12000.00"
+
+        inf_modal = etree.SubElement(
+            inf_cte_norm,
+            etree.QName(NAMESPACE_CTE, "infModal"),
+            versaoModal=VERSAO_CTE,
+        )
+        rodo = etree.SubElement(inf_modal, etree.QName(NAMESPACE_CTE, "rodo"))
+        etree.SubElement(rodo, etree.QName(NAMESPACE_CTE, "RNTRC")).text = "49339511"
+
+        imp = cte.find(".//cte:imp", namespaces=ns)
+        if imp is None:
+            inf_cte.append(inf_cte_norm)
+        else:
+            inf_cte.insert(inf_cte.index(imp) + 1, inf_cte_norm)
 
     url_qrcode = (
         "https://homologacao.nfe.fazenda.sp.gov.br/CTeConsulta/qrCode"
@@ -875,6 +925,24 @@ def assinar_mdfe(
         pkcs12_data=str(caminho_certificado),
         pkcs12_password=senha_certificado,
         doc_id=f"MDFe{chave}",
+    )
+
+
+def assinar_evento_mdfe(
+    xml: str,
+    id_evento: str,
+    caminho_certificado: Path,
+    senha_certificado: str,
+) -> str:
+    """Assina evento MDF-e pelo Id do infEvento."""
+    if not caminho_certificado.exists():
+        raise FileNotFoundError(f"Certificado nao encontrado: {caminho_certificado}")
+
+    return Mdfe.sign_xml(
+        xml,
+        pkcs12_data=str(caminho_certificado),
+        pkcs12_password=senha_certificado,
+        doc_id=id_evento,
     )
 
 
@@ -1004,6 +1072,218 @@ def transmitir_documento_homologacao(
         else URL_AUTORIZACAO_CTE_HOMOLOGACAO_SVRS,
     }[tipo_documento]
 
+    erro_final = None
+    for tentativa in range(1, TENTATIVAS_TRANSMISSAO + 1):
+        try:
+            print(
+                f"Tentativa {tentativa}/{TENTATIVAS_TRANSMISSAO} em {url_autorizacao}"
+            )
+            return _transmitir_documento_homologacao_uma_tentativa(
+                xml_lote=xml_lote,
+                chave=chave,
+                certificado=certificado,
+                pasta_saida=pasta_saida,
+                pasta_documento=pasta_documento,
+                tipo_documento=tipo_documento,
+                url_autorizacao=url_autorizacao,
+                uf_emitente=uf_emitente,
+            )
+        except (RequestsConnectionError, Timeout, RequestException, OSError) as erro:
+            erro_final = erro
+            caminho_erro = pasta_documento / f"{chave}-erro-transmissao.json"
+            caminho_erro.write_text(
+                json.dumps(
+                    {
+                        "tipo": "erro_conexao",
+                        "documento": tipo_documento.upper(),
+                        "endpoint": url_autorizacao,
+                        "tentativa": tentativa,
+                        "tentativas": TENTATIVAS_TRANSMISSAO,
+                        "erro": str(erro),
+                        "registrado_em": datetime.now(FUSO_BRASIL).isoformat(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            if tentativa < TENTATIVAS_TRANSMISSAO:
+                time.sleep(INTERVALO_TENTATIVA_SEGUNDOS)
+                continue
+            raise ConnectionError(
+                f"Erro de conexao ao transmitir {tipo_documento.upper()} para {url_autorizacao} "
+                f"apos {TENTATIVAS_TRANSMISSAO} tentativas: {erro}"
+            ) from erro
+
+    raise ConnectionError(f"Erro de conexao na transmissao: {erro_final}")
+
+
+def montar_evento_encerramento_mdfe(
+    *,
+    chave: str,
+    protocolo: str,
+    cnpj_emitente: str,
+    codigo_uf: str,
+    codigo_municipio: str,
+    data_encerramento: datetime,
+    sequencia: int = 1,
+) -> tuple[str, str]:
+    """Monta evento 110112 de encerramento de MDF-e."""
+    id_evento = f"ID110112{chave}{sequencia:02d}"
+    evento = etree.Element(
+        etree.QName(NAMESPACE_MDFE, "eventoMDFe"),
+        nsmap={None: NAMESPACE_MDFE},
+        versao=VERSAO_MDFE,
+    )
+    inf_evento = etree.SubElement(evento, etree.QName(NAMESPACE_MDFE, "infEvento"), Id=id_evento)
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "cOrgao")).text = codigo_uf
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "tpAmb")).text = AMBIENTE_HOMOLOGACAO
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "CNPJ")).text = somente_digitos(cnpj_emitente)
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "chMDFe")).text = chave
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "dhEvento")).text = datetime.now(FUSO_BRASIL).replace(microsecond=0).isoformat()
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "tpEvento")).text = "110112"
+    etree.SubElement(inf_evento, etree.QName(NAMESPACE_MDFE, "nSeqEvento")).text = str(sequencia)
+    det_evento = etree.SubElement(
+        inf_evento,
+        etree.QName(NAMESPACE_MDFE, "detEvento"),
+        versaoEvento=VERSAO_MDFE,
+    )
+    ev_enc = etree.SubElement(det_evento, etree.QName(NAMESPACE_MDFE, "evEncMDFe"))
+    etree.SubElement(ev_enc, etree.QName(NAMESPACE_MDFE, "descEvento")).text = "Encerramento"
+    etree.SubElement(ev_enc, etree.QName(NAMESPACE_MDFE, "nProt")).text = protocolo
+    etree.SubElement(ev_enc, etree.QName(NAMESPACE_MDFE, "dtEnc")).text = data_encerramento.strftime("%Y-%m-%d")
+    etree.SubElement(ev_enc, etree.QName(NAMESPACE_MDFE, "cUF")).text = codigo_uf
+    etree.SubElement(ev_enc, etree.QName(NAMESPACE_MDFE, "cMun")).text = codigo_municipio
+    return etree.tostring(evento, encoding="unicode", pretty_print=False), id_evento
+
+
+def transmitir_evento_encerramento_mdfe(
+    *,
+    xml_evento_assinado: str,
+    chave: str,
+    certificado: Certificado,
+    pasta_saida: Path,
+) -> str:
+    """Transmite evento de encerramento MDF-e e salva lote/retorno."""
+    pasta_documento = caminho_saida_documento(pasta_saida, chave)
+    xml_lote = xml_evento_assinado
+    caminho_lote = pasta_documento / f"{chave}-evento-encerramento-lote.xml"
+    caminho_lote.write_text(xml_lote, encoding="utf-8")
+
+    erro_final = None
+    for tentativa in range(1, TENTATIVAS_TRANSMISSAO + 1):
+        try:
+            print(f"Tentativa {tentativa}/{TENTATIVAS_TRANSMISSAO} em {URL_EVENTO_MDFE_HOMOLOGACAO_SVRS}")
+            with ArquivoCertificado(certificado, "w") as (cert_path, key_path):
+                requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+                session = Session()
+                session.cert = (cert_path, key_path)
+                session.verify = False
+                transport = Transport(
+                    session=session,
+                    cache=SqliteCache(path=str(pasta_saida / "zeep-cache.db"), timeout=60),
+                    timeout=30,
+                )
+                client = Client(WSDL_EVENTO_MDFE_HOMOLOGACAO_SVRS, transport=transport)
+                service = client.create_service(
+                    "{http://www.portalfiscal.inf.br/mdfe/wsdl/MDFeRecepcaoEvento}MDFeRecepcaoEventoSoap12",
+                    URL_EVENTO_MDFE_HOMOLOGACAO_SVRS,
+                )
+                with client.settings(raw_response=True):
+                    resposta = service.mdfeRecepcaoEvento(
+                        etree.fromstring(xml_lote.encode("utf-8"))
+                    )
+            retorno = resposta.text
+            caminho_retorno = pasta_documento / f"{chave}-evento-encerramento-retorno.xml"
+            caminho_retorno.write_text(retorno, encoding="utf-8")
+            return retorno
+        except (RequestsConnectionError, Timeout, RequestException, OSError) as erro:
+            erro_final = erro
+            if tentativa < TENTATIVAS_TRANSMISSAO:
+                time.sleep(INTERVALO_TENTATIVA_SEGUNDOS)
+                continue
+            raise ConnectionError(
+                f"Erro de conexao ao encerrar MDF-e {chave} apos {TENTATIVAS_TRANSMISSAO} tentativas: {erro}"
+            ) from erro
+
+    raise ConnectionError(f"Erro de conexao no encerramento MDF-e: {erro_final}")
+
+
+def extrair_status_evento_mdfe(xml_retorno: str) -> dict:
+    raiz = etree.fromstring(xml_retorno.encode("utf-8"))
+    ns = {"mdfe": NAMESPACE_MDFE}
+    inf_evento = raiz.find(".//mdfe:retEventoMDFe/mdfe:infEvento", namespaces=ns)
+    if inf_evento is None:
+        inf_evento = raiz.find(".//mdfe:infEvento", namespaces=ns)
+    return {
+        "cstat": inf_evento.findtext("mdfe:cStat", namespaces=ns) if inf_evento is not None else "",
+        "motivo": inf_evento.findtext("mdfe:xMotivo", namespaces=ns) if inf_evento is not None else "",
+        "protocolo": inf_evento.findtext("mdfe:nProt", namespaces=ns) if inf_evento is not None else "",
+        "data_recebimento": inf_evento.findtext("mdfe:dhRegEvento", namespaces=ns) if inf_evento is not None else "",
+    }
+
+
+def encerrar_mdfe_homologacao(
+    *,
+    chave: str,
+    protocolo: str,
+    emitente: EmitenteExemplo,
+    caminho_certificado: Path,
+    senha_certificado: str,
+    pasta_saida: Path,
+    data_encerramento: datetime | None = None,
+) -> dict:
+    """Gera, assina e transmite o evento de encerramento do MDF-e."""
+    data_encerramento = data_encerramento or datetime.now(FUSO_BRASIL)
+    xml_evento, id_evento = montar_evento_encerramento_mdfe(
+        chave=chave,
+        protocolo=protocolo,
+        cnpj_emitente=emitente.cnpj,
+        codigo_uf=emitente.uf_codigo,
+        codigo_municipio=emitente.municipio_codigo,
+        data_encerramento=data_encerramento,
+    )
+    pasta_documento = caminho_saida_documento(pasta_saida, chave)
+    caminho_evento = pasta_documento / f"{chave}-evento-encerramento.xml"
+    caminho_evento.write_text(xml_evento, encoding="utf-8")
+    xml_assinado = assinar_evento_mdfe(
+        xml=xml_evento,
+        id_evento=id_evento,
+        caminho_certificado=caminho_certificado,
+        senha_certificado=senha_certificado,
+    )
+    caminho_evento_assinado = pasta_documento / f"{chave}-evento-encerramento-assinado.xml"
+    caminho_evento_assinado.write_text(xml_assinado, encoding="utf-8")
+    retorno = transmitir_evento_encerramento_mdfe(
+        xml_evento_assinado=xml_assinado,
+        chave=chave,
+        certificado=Certificado(str(caminho_certificado), senha_certificado),
+        pasta_saida=pasta_saida,
+    )
+    status = extrair_status_evento_mdfe(retorno)
+    registros = carregar_registro_dfe()
+    for item in registros:
+        if item.get("chave") == chave:
+            item["status"] = "encerrado" if status.get("cstat") in {"135", "136", "155"} else item.get("status", "autorizado")
+            item["evento_encerramento"] = str(caminho_documento := pasta_documento / f"{chave}-evento-encerramento-retorno.xml")
+            item["motivo"] = status.get("motivo") or item.get("motivo", "")
+            item["atualizado_em"] = datetime.now(FUSO_BRASIL).isoformat()
+            break
+    salvar_registro_dfe(registros)
+    return status
+
+
+def _transmitir_documento_homologacao_uma_tentativa(
+    *,
+    xml_lote: str,
+    chave: str,
+    certificado: Certificado,
+    pasta_saida: Path,
+    pasta_documento: Path,
+    tipo_documento: str,
+    url_autorizacao: str,
+    uf_emitente: str,
+) -> str:
     with ArquivoCertificado(certificado, "w") as (cert_path, key_path):
         requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
         session = Session()
@@ -1770,7 +2050,7 @@ def enviar_documento_por_email(
     if not host or not remetente:
         print("E-mail nao enviado: SMTP nao configurado em config_nfce.json.")
         return
-    if not caminho_xml.exists() or not caminho_pdf.exists():
+    if not caminho_xml.is_file() or not caminho_pdf.is_file():
         print("E-mail nao enviado: XML ou PDF final nao encontrado.")
         return
 
@@ -1887,6 +2167,21 @@ def main() -> None:
         default=str(ULTIMO_NUMERO_PADRAO),
         help="Arquivo texto que guarda o ultimo numero autorizado.",
     )
+    parser.add_argument(
+        "--encerrar-mdfe",
+        action="store_true",
+        help="Gera e transmite evento de encerramento MDF-e em homologacao.",
+    )
+    parser.add_argument(
+        "--chave-mdfe",
+        default=None,
+        help="Chave do MDF-e a encerrar.",
+    )
+    parser.add_argument(
+        "--protocolo-mdfe",
+        default=None,
+        help="Protocolo de autorizacao do MDF-e a encerrar.",
+    )
     args = parser.parse_args()
     config = carregar_config(Path(args.config))
 
@@ -1908,7 +2203,9 @@ def main() -> None:
     csc_token = os.getenv("SCFACIL_CSC_TOKEN") or obter_config(config, "csc.token")
 
     senha_certificado = (
-        obter_senha_certificado(config, config_emitente) if args.assinar else None
+        obter_senha_certificado(config, config_emitente)
+        if args.assinar or args.encerrar_mdfe
+        else None
     )
     emitente = montar_emitente_base(config_emitente)
     tributacao = montar_tributacao(config_emitente)
@@ -1923,6 +2220,29 @@ def main() -> None:
             f"Emitente selecionado: {config_emitente.get('id')} - "
             f"{emitente.nome} - {emitente.cnpj}"
         )
+
+    pasta_saida = Path(__file__).parent / "saida"
+    pasta_saida.mkdir(exist_ok=True)
+
+    if args.encerrar_mdfe:
+        if args.tipo != "mdfe":
+            raise ValueError("Use --tipo mdfe junto com --encerrar-mdfe.")
+        if not args.chave_mdfe or not args.protocolo_mdfe:
+            raise ValueError("Informe --chave-mdfe e --protocolo-mdfe para encerrar MDF-e.")
+        chave_encerramento = somente_digitos(args.chave_mdfe)
+        print(f"Encerrando MDF-e {chave_encerramento} em homologacao...")
+        status_evento = encerrar_mdfe_homologacao(
+            chave=chave_encerramento,
+            protocolo=somente_digitos(args.protocolo_mdfe),
+            emitente=emitente,
+            caminho_certificado=caminho_certificado,
+            senha_certificado=senha_certificado,
+            pasta_saida=pasta_saida,
+        )
+        print(f"Status encerramento: {status_evento.get('cstat')} - {status_evento.get('motivo')}")
+        if status_evento.get("cstat") not in {"135", "136", "155"}:
+            raise SystemExit(1)
+        return
 
     caminho_ultimo_numero = Path(args.arquivo_ultimo_numero)
     numeracao = obter_numeracao(
@@ -1969,9 +2289,6 @@ def main() -> None:
         xml = compactar_xml(documento.to_xml())
         chave = obter_chave_nfce(documento)
     xml_para_validar = xml
-
-    pasta_saida = Path(__file__).parent / "saida"
-    pasta_saida.mkdir(exist_ok=True)
 
     caminho_xml = pasta_saida / f"{args.tipo}_exemplo.xml"
     caminho_xml.write_text(xml, encoding="utf-8")
@@ -2050,6 +2367,14 @@ def main() -> None:
             )
         except Exception as erro:
             dados_xml = dados_documento_xml(xml_assinado, args.tipo)
+            erro_texto = str(erro)
+            erro_conexao = isinstance(erro, ConnectionError) or "Erro de conexao" in erro_texto
+            motivo_erro = (
+                "Erro de conexão com o webservice fiscal. Nenhuma autorização/protocolo foi retornado."
+                if erro_conexao
+                else erro_texto
+            )
+            caminho_erro = caminho_saida_documento(pasta_saida, chave) / f"{chave}-erro-transmissao.json"
             registrar_dfe(
                 {
                     "tipo": args.tipo.upper(),
@@ -2061,19 +2386,28 @@ def main() -> None:
                     "protocolo": "",
                     "data_emissao": dados_xml.get("data_emissao"),
                     "valor": dados_xml.get("valor"),
-                    "status": "erro",
-                    "cstat": "",
-                    "erro": str(erro),
-                    "motivo": str(erro),
+                    "status": "erro_conexao" if erro_conexao else "erro",
+                    "cstat": "ERRO_CONEXAO" if erro_conexao else "",
+                    "erro": motivo_erro,
+                    "motivo": motivo_erro,
                     "data_recebimento": "",
                     "xml": "",
                     "pdf": "",
-                    "retorno": "",
-                    "lote": "",
+                    "retorno": str(caminho_erro) if caminho_erro.exists() else "",
+                    "lote": str(caminho_saida_documento(pasta_saida, chave) / f"{chave}-lote.xml"),
+                    "endpoint": {
+                        "nfce": URL_AUTORIZACAO_NFCE_HOMOLOGACAO_SVRS,
+                        "nfe": URL_AUTORIZACAO_NFE_HOMOLOGACAO_SVRS,
+                        "mdfe": URL_AUTORIZACAO_MDFE_HOMOLOGACAO_SVRS,
+                        "cte": URL_AUTORIZACAO_CTE_HOMOLOGACAO_SP
+                        if emitente.uf_sigla == "SP"
+                        else URL_AUTORIZACAO_CTE_HOMOLOGACAO_SVRS,
+                    }.get(args.tipo, ""),
+                    "tentativas": TENTATIVAS_TRANSMISSAO if erro_conexao else 1,
                     "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
                 }
             )
-            print(f"Erro na transmissao registrado: {erro}")
+            print(f"Erro na transmissao registrado: {motivo_erro}")
             raise SystemExit(1) from erro
 
         caminhos_finais = salvar_arquivos_finais(
@@ -2116,14 +2450,16 @@ def main() -> None:
             salvar_ultimo_numero(caminho_ultimo_numero, numeracao.numero)
             print(f"Ultimo numero autorizado salvo em: {caminho_ultimo_numero}")
 
-        if args.enviar_email:
+        if args.enviar_email and autorizado:
             enviar_documento_por_email(
                 config=config,
                 chave=chave,
-                caminho_xml=pasta_saida / f"{chave}.xml",
-                caminho_pdf=pasta_saida / f"{chave}.pdf",
+                caminho_xml=Path(caminhos_finais.get("xml", "")),
+                caminho_pdf=Path(caminhos_finais.get("pdf", "")),
                 tipo_documento=args.tipo,
             )
+        elif args.enviar_email:
+            print("E-mail nao enviado: documento nao autorizado.")
 
 
 if __name__ == "__main__":

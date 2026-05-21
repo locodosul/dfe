@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -217,6 +218,50 @@ def listar_emitentes() -> list[dict]:
     ]
 
 
+def caminho_numeracao_nfse(emitente_id: str | None) -> Path:
+    sufixo = "".join(
+        caractere
+        for caractere in str(emitente_id or "padrao")
+        if caractere.isalnum() or caractere in ("-", "_")
+    )
+    return BASE_DIR / f"ultimo_numero_nfse_{sufixo}.txt"
+
+
+def ler_numero_arquivo(caminho: Path) -> str:
+    if not caminho.exists():
+        return "0"
+    conteudo = caminho.read_text(encoding="utf-8-sig").strip().lstrip("\ufeff")
+    return conteudo or "0"
+
+
+def ultimo_numero_documento(tipo: str | None, emitente: str | None) -> str:
+    tipo = (tipo or "nfce").lower()
+    if tipo == "nfse":
+        return ler_numero_arquivo(caminho_numeracao_nfse(emitente))
+    return ler_numero_arquivo(BASE_DIR / "ultimo_numero_nfce.txt")
+
+
+def localizar_mdfe_pendente_encerramento() -> dict | None:
+    padrao = re.compile(
+        r"chMDFe Não Encerrada:(?P<chave>\d{44})\]\[NroProtocolo:(?P<protocolo>\d+)\]"
+    )
+    for registro in carregar_registro_dfe():
+        if (registro.get("tipo") or "").upper() != "MDFE":
+            continue
+        texto = " ".join(
+            str(registro.get(campo, ""))
+            for campo in ("erro", "motivo")
+        )
+        achado = padrao.search(texto)
+        if achado:
+            return {
+                "chave": achado.group("chave"),
+                "protocolo": achado.group("protocolo"),
+                "emitente": registro.get("emitente") or "rambo",
+            }
+    return None
+
+
 def executar_fluxo(
     acao: str,
     numero: str | None = None,
@@ -226,6 +271,43 @@ def executar_fluxo(
     tipo = (tipo or "nfce").lower()
     if tipo not in {"nfce", "nfe", "mdfe", "cte", "nfse"}:
         return {"ok": False, "erro": f"Tipo de documento desconhecido: {tipo}"}
+
+    if acao == "encerrar_mdfe":
+        pendente = localizar_mdfe_pendente_encerramento()
+        if not pendente:
+            return {
+                "ok": False,
+                "erro": "Nenhum MDF-e pendente de encerramento foi encontrado no registro local.",
+            }
+        comando = [
+            sys.executable,
+            str(SCRIPT_NFCE),
+            "--tipo",
+            "mdfe",
+            "--emitente",
+            emitente or pendente["emitente"],
+            "--encerrar-mdfe",
+            "--chave-mdfe",
+            pendente["chave"],
+            "--protocolo-mdfe",
+            pendente["protocolo"],
+        ]
+        processo = subprocess.run(
+            comando,
+            cwd=BASE_DIR,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        return {
+            "ok": processo.returncode == 0,
+            "codigo": processo.returncode,
+            "comando": " ".join(comando),
+            "saida": processo.stdout,
+            "erro": processo.stderr,
+            "chave": pendente["chave"],
+            "links": montar_links(pendente["chave"]),
+        }
 
     if tipo == "nfse":
         comandos_nfse = {
@@ -386,12 +468,12 @@ class Handler(BaseHTTPRequestHandler):
             self.enviar_html_impressao()
             return
         if caminho == "/api/status":
-            ultimo = BASE_DIR / "ultimo_numero_nfce.txt"
+            consulta = parse_qs(urlparse(self.path).query)
+            tipo = (consulta.get("tipo") or ["nfce"])[0]
+            emitente = (consulta.get("emitente") or [None])[0]
             self.enviar_json(
                 {
-                    "ultimo_numero": ultimo.read_text(encoding="utf-8").strip()
-                    if ultimo.exists()
-                    else "0",
+                    "ultimo_numero": ultimo_numero_documento(tipo, emitente),
                     "emitentes": listar_emitentes(),
                     "emitente_padrao": carregar_config().get("emitente_padrao"),
                     "arquivos": listar_ultimos_arquivos(),
@@ -477,11 +559,6 @@ class Handler(BaseHTTPRequestHandler):
 </head>
 <body>
   <iframe src="/saida/{rel.replace(os.sep, "/")}" title="Visualizacao do PDF"></iframe>
-  <script>
-    window.addEventListener("load", () => {{
-      setTimeout(() => window.print(), 900);
-    }});
-  </script>
 </body>
 </html>""".encode("utf-8")
         self.send_response(200)
