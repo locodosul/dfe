@@ -32,6 +32,42 @@
           "modalidade_base_calculo": "3",
           "aliquota": "18.00"
         }
+      },
+      "nfse": {
+        "ambiente": "2",
+        "municipio_codigo": "4314902",
+        "municipio_nome": "Porto Alegre",
+        "serie": "1",
+        "ver_aplic": "SCFacil",
+        "tipo_emitente": "1",
+        "fone": "51999999999",
+        "email": "prestador@exemplo.com",
+        "tomador": {
+          "cnpj": "13624934000146",
+          "nome": "TOMADOR DE SERVICO LTDA",
+          "municipio_codigo": "4314100",
+          "cep": "99010120",
+          "logradouro": "AV SETE DE SETEMBRO",
+          "numero": "035",
+          "bairro": "CENTRO",
+          "fone": "5433118282",
+          "email": "tomador@exemplo.com"
+        },
+        "servico": {
+          "municipio_prestacao": "4314902",
+          "codigo_tributacao_nacional": "010601",
+          "codigo_nbs": "115011000",
+          "descricao": "Servico de consultoria em tecnologia da informacao.",
+          "valor": "680.00"
+        },
+        "tributacao": {
+          "op_simp_nac": "3",
+          "reg_ap_trib_sn": "1",
+          "reg_esp_trib": "0",
+          "trib_issqn": "1",
+          "tipo_retencao_issqn": "1",
+          "percentual_total_tributos_sn": "18.13"
+        }
       }
     },
     {
